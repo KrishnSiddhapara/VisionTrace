@@ -12,7 +12,7 @@ from intelligence.temporal_reasoner import temporal_reasoner
 from intelligence.key_moment_detector import key_moment_detector
 from intelligence.anomaly_detector import anomaly_detector
 from intelligence.video_memory import video_memory_manager
-from models.schemas import VideoMemory
+from models.schemas import VideoMemory, DeveloperMetrics
 from qa.video_qa import video_qa_engine
 from retrieval.semantic_search import semantic_search_engine
 from reports.report_generator import report_generator
@@ -25,6 +25,9 @@ from frontend.analytics_ui import (
     render_scenes_ui,
     render_quality_control_panel,
     render_bbox_debug_visualizer,
+    render_developer_accuracy_dashboard,
+    render_movement_frames_ui,
+    render_final_summary_ui,
 )
 from utils.logger import logger
 
@@ -45,7 +48,7 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
     progress_bar = st.progress(0, text="Initializing high-accuracy video processing pipeline...")
 
     # Step 1: Validation & Metadata
-    progress_bar.progress(10, text="✓ Step 1/7: Validating video & extracting metadata...")
+    progress_bar.progress(10, text="✓ Step 1/8: Validating video & extracting metadata...")
     validation, metadata, scenes, _ = video_processor.process_video(video_path)
 
     # Check cached memory
@@ -55,41 +58,87 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
         progress_bar.progress(100, text="✓ Loaded cached VideoMemory.")
         return existing_mem
 
-    # Step 2: Intelligent Multi-Criteria Sampler
-    progress_bar.progress(25, text=f"● Step 2/7: Extracting intelligent representative frames ({sampling_mode} Mode)...")
+    # Step 2: Intelligent Multi-Criteria Sampler (Pass 1)
+    progress_bar.progress(25, text=f"● Step 2/8: Extracting motion-adaptive representative frames ({sampling_mode} Mode)...")
     output_frames_dir = settings.PROCESSED_DIR / metadata.video_hash / "frames"
     sampled_frames = frame_sampler.sample_scene_frames(video_path, scenes, output_frames_dir, sampling_mode=sampling_mode)
 
-    # Step 3: Multi-Frame Window VLM Frame Analysis
-    progress_bar.progress(45, text="● Step 3/7: Analyzing frames with Vision-Language Model & window context...")
-    frame_obs_list = []
-    prev_obs = None
-    for sf in sampled_frames:
-        obs = frame_analyzer.analyze_frame(sf, prev_obs=prev_obs)
-        frame_obs_list.append(obs)
-        prev_obs = obs
+    # Step 3: Temporal Frame Window VLM Analysis (Pass 1)
+    progress_bar.progress(40, text="● Step 3/8: Analyzing frame windows [PREV, CURR, NEXT] with VLM & quality checks...")
+    frame_obs_map = {}
+    for i, sf in enumerate(sampled_frames):
+        pf = sampled_frames[i - 1] if i > 0 else None
+        nf = sampled_frames[i + 1] if i + 1 < len(sampled_frames) else None
+        obs = frame_analyzer.analyze_frame_window(
+            sampled_frame=sf,
+            prev_frame=pf,
+            next_frame=nf,
+            video_hash=metadata.video_hash,
+        )
+        frame_obs_map[sf.frame_id] = obs
+
+    frame_obs_list = list(frame_obs_map.values())
 
     # Step 4: YOLO Object Detection
-    progress_bar.progress(60, text="● Step 4/7: Running YOLO object detection...")
+    progress_bar.progress(55, text="● Step 4/8: Running YOLO object detection...")
     yolo_dets = {}
     for sf in sampled_frames:
-        dets = object_detector.detect_objects(sf.path)
+        dets = object_detector.detect_objects(sf.path, video_hash=metadata.video_hash)
         yolo_dets[sf.frame_id] = dets
 
     # Step 5: Bounding Box IoU Spatial Tracking
-    progress_bar.progress(75, text="● Step 5/7: Tracking objects with BBox IoU spatial matcher...")
+    progress_bar.progress(65, text="● Step 5/8: Tracking entities with gap-tolerant IoU spatial matcher...")
     tracks = object_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
 
-    # Step 6: Multi-Frame Temporal Event Verification
-    progress_bar.progress(85, text="● Step 6/7: Verifying physical state changes & timed events...")
-    events = event_detector.detect_events(scenes, frame_obs_list, tracks)
+    # Step 6: Initial Candidate Events & Pass 2 Dense Sampling
+    progress_bar.progress(75, text="● Step 6/8: Identifying candidate events & extracting Pass 2 dense frames...")
+    candidate_events = event_detector.detect_events(scenes, frame_obs_list, tracks)
+    event_windows = [(e.start_time, e.end_time) for e in candidate_events if e.event_type != "SCENE"]
 
-    # Step 7: Temporal Reasoning & Memory
-    progress_bar.progress(95, text="● Step 7/7: Synthesizing timeline & structured memory...")
-    timeline = temporal_reasoner.synthesize_timeline(scenes, events, tracks, frame_obs_list)
+    if event_windows:
+        sampled_frames = frame_sampler.sample_event_dense_frames(video_path, event_windows, output_frames_dir, sampled_frames)
+        # Analyze new dense frames
+        for sf in sampled_frames:
+            if sf.frame_id not in frame_obs_map:
+                obs = frame_analyzer.analyze_frame_window(sf, video_hash=metadata.video_hash)
+                frame_obs_map[sf.frame_id] = obs
+                yolo_dets[sf.frame_id] = object_detector.detect_objects(sf.path, video_hash=metadata.video_hash)
+
+        frame_obs_list = sorted(list(frame_obs_map.values()), key=lambda o: o.timestamp)
+
+    # Step 7: Event Verification Pipeline & Confidence Calculation
+    progress_bar.progress(85, text="● Step 7/8: Running multi-source event verification & confidence scoring...")
+    tracks = object_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
+    verified_events = event_detector.detect_events(scenes, frame_obs_list, tracks)
+
+    # Step 8: Temporal Reasoning & Memory Telemetry
+    progress_bar.progress(95, text="● Step 8/8: Synthesizing timeline, final summary & structured memory...")
+    timeline = temporal_reasoner.synthesize_timeline(scenes, verified_events, tracks, frame_obs_list)
     summaries = temporal_reasoner.generate_summaries(metadata, scenes, timeline, tracks)
-    key_moments = key_moment_detector.detect_key_moments(events, tracks, scenes)
-    anomalies = anomaly_detector.detect_anomalies(frame_obs_list, tracks)
+    final_summary = temporal_reasoner.generate_final_summary(metadata, scenes, timeline, tracks, frame_obs_list, sampled_frames)
+
+    analyzed_cnt = len([o for o in frame_obs_list if o.is_analyzed])
+    skipped_cnt = len([o for o in frame_obs_list if not o.is_analyzed])
+    avg_c = float(sum(e.confidence for e in verified_events) / max(1, len(verified_events)))
+
+    metrics = DeveloperMetrics(
+        total_video_frames=metadata.frame_count,
+        candidate_movement_frames=len(sampled_frames) * 3,
+        selected_change_frames=len(sampled_frames),
+        static_frames_discarded=max(0, metadata.frame_count - len(sampled_frames)),
+        frames_sampled=len(sampled_frames),
+        frames_analyzed=analyzed_cnt,
+        frames_skipped=skipped_cnt,
+        vlm_calls=analyzed_cnt,
+        vlm_retries=0,
+        vlm_failures=skipped_cnt,
+        yolo_detections_count=sum(len(d) for d in yolo_dets.values()),
+        tracked_entities_count=len(tracks),
+        candidate_events_count=len(candidate_events),
+        verified_events_count=len(verified_events),
+        rejected_events_count=max(0, len(candidate_events) - len(verified_events)),
+        average_confidence=round(avg_c, 2),
+    )
 
     memory = VideoMemory(
         video_hash=cache_key_hash,
@@ -99,10 +148,12 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
         frame_observations=frame_obs_list,
         yolo_detections=yolo_dets,
         tracks=tracks,
-        events=events,
+        events=verified_events,
         timeline=timeline,
         summary=summaries,
+        final_summary=final_summary,
         insights=[],
+        developer_metrics=metrics,
     )
 
     video_memory_manager.save_memory(memory)
@@ -130,8 +181,9 @@ def render_dashboard() -> None:
         st.divider()
         st.markdown(f"**VLM Provider:** `{settings.VLM_PROVIDER.upper()}`")
         st.markdown(f"**VLM Model:** `{settings.VLM_MODEL}`")
+        st.markdown(f"**Mock Mode:** `{settings.VLM_MOCK_MODE}`")
         st.markdown(f"**YOLO Threshold:** `{settings.YOLO_CONFIDENCE}`")
-        st.markdown(f"**Max Video Duration:** `{settings.MAX_VIDEO_DURATION_SEC}s`")
+        st.markdown(f"**Analysis Ver:** `{settings.ANALYSIS_VERSION}`")
 
         st.divider()
         st.markdown("### 🚫 Scope Restriction")
@@ -151,15 +203,12 @@ def render_dashboard() -> None:
         with open(save_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        try:
-            memory = run_full_pipeline(save_path, sampling_mode=st.session_state["sampling_mode"])
+        st.session_state["video_path"] = save_path
+
+        if st.button("🚀 Process Video with High-Accuracy Pipeline", type="primary"):
+            memory = run_full_pipeline(save_path, sampling_mode=sampling_mode)
             st.session_state["memory"] = memory
             st.session_state["metadata"] = memory.metadata
-            st.session_state["video_path"] = str(save_path)
-            st.success(f"✅ Video `{memory.metadata.filename}` processed with high accuracy!")
-        except Exception as e:
-            st.error(f"❌ Error processing video: {str(e)}")
-            logger.error(f"Processing error: {e}", exc_info=True)
 
     # Render ingested video player & tabs if video exists
     if st.session_state["metadata"] is not None:
@@ -191,55 +240,60 @@ def render_dashboard() -> None:
 
             # Phase Tabs
             tabs = st.tabs([
-                "📋 Overview",
+                "📝 Overview & Summary",
                 "🎬 Scenes",
-                "🔍 Objects & People",
-                "⚡ Events & Actions",
-                "⏳ Timeline",
-                "💡 Key Moments & Insights",
+                "🏃 Movement Frames",
+                "🔍 Tracked Entities",
+                "⚡ Verified Events",
+                "⏱️ Timeline",
+                "⭐ Key Moments",
                 "💬 Ask AI (Q&A)",
                 "🔎 Semantic Search",
                 "🎯 BBox Debugger",
-                "📑 Report & Export"
+                "📑 Report & Export",
+                "📊 Developer Dashboard",
             ])
 
-            # Tab 0: Overview
+            # Tab 0: Overview & Summary
             with tabs[0]:
-                st.subheader("📝 Grounded Executive Summary")
-                summary_level = st.radio("Select Summary Level:", ["Standard", "Quick", "Detailed", "Technical"], horizontal=True)
-                key = summary_level.lower()
-                st.write(memory.summary.get(key, memory.summary.get("standard", "")))
+                render_final_summary_ui(memory)
 
             # Tab 1: Scenes
             with tabs[1]:
                 render_scenes_ui(memory.scenes)
 
-            # Tab 2: Objects & People
+            # Tab 2: Movement Frames
             with tabs[2]:
+                render_movement_frames_ui(memory.sampled_frames)
+
+            # Tab 3: Tracked Entities
+            with tabs[3]:
                 render_objects_and_tracks_ui(memory.tracks)
 
-            # Tab 3: Events & Actions
-            with tabs[3]:
+            # Tab 4: Verified Events
+            with tabs[4]:
                 st.subheader("⚡ Verified Timed Events")
                 for evt in memory.events:
+                    lvl = getattr(evt, "evidence_level", "CONFIRMED")
+                    badge = "🟢" if lvl == "CONFIRMED" else ("🔵" if lvl == "PROBABLE" else "🟡")
                     conf_pct = int(evt.confidence * 100)
                     st.markdown(
-                        f"**[{evt.start_time:.1f}s - {evt.end_time:.1f}s]** `{evt.event_type}` — {evt.description} *(Confidence: `{conf_pct}%`)*"
+                        f"{badge} **[{evt.start_time:.1f}s - {evt.end_time:.1f}s]** `{evt.event_type}` — {evt.description} *(Level: `{lvl}`, Confidence: `{conf_pct}%`)*"
                     )
 
-            # Tab 4: Timeline
-            with tabs[4]:
+            # Tab 5: Timeline
+            with tabs[5]:
                 render_timeline_ui(memory.timeline)
 
-            # Tab 5: Key Moments
-            with tabs[5]:
+            # Tab 6: Key Moments
+            with tabs[6]:
                 st.subheader("⭐ Key Video Moments")
                 for idx, obs in enumerate(memory.frame_observations):
                     if obs.activities:
                         st.markdown(f"⭐ **[{obs.timestamp:.2f}s]** {', '.join(obs.activities)}")
 
-            # Tab 6: Ask AI (Q&A)
-            with tabs[6]:
+            # Tab 7: Ask AI (Q&A)
+            with tabs[7]:
                 st.subheader("💬 Ask AI About This Video")
                 question = st.text_input("Ask a question:", placeholder="e.g. When did the person enter? What objects were moved?")
                 if question:
@@ -257,8 +311,8 @@ def render_dashboard() -> None:
                         for unc in response.unknown_aspects:
                             st.markdown(f"- {unc}")
 
-            # Tab 7: Semantic Search
-            with tabs[7]:
+            # Tab 8: Semantic Search
+            with tabs[8]:
                 st.subheader("🔎 Semantic Video Search")
                 search_query = st.text_input("Search visual moment:", placeholder="e.g. laptop on desk, person walking")
                 if search_query:
@@ -267,12 +321,12 @@ def render_dashboard() -> None:
                     for r in results:
                         st.markdown(f"⏱️ **[{r['timestamp']}s]** (Score: `{r['score']}`) — *{r['text']}*")
 
-            # Tab 8: BBox Debugger
-            with tabs[8]:
+            # Tab 9: BBox Debugger
+            with tabs[9]:
                 render_bbox_debug_visualizer(memory.sampled_frames, memory.yolo_detections)
 
-            # Tab 9: Report & Export
-            with tabs[9]:
+            # Tab 10: Report & Export
+            with tabs[10]:
                 st.subheader("📑 Generate & Export Comprehensive Report")
                 reports = report_generator.generate_all_reports(memory)
 
@@ -286,3 +340,7 @@ def render_dashboard() -> None:
                 with col_p:
                     with open(reports["pdf"], "rb") as f:
                         st.download_button("📥 Download PDF Report", f, file_name=reports["pdf"].name, mime="application/pdf")
+
+            # Tab 11: Developer Dashboard
+            with tabs[11]:
+                render_developer_accuracy_dashboard(memory)

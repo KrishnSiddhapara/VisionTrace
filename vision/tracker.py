@@ -1,3 +1,4 @@
+import numpy as np
 from typing import List, Dict, Any, Tuple
 from models.schemas import SampledFrame, YOLODetection, TrackedObject, FrameObservation
 from utils.logger import logger
@@ -31,12 +32,13 @@ def calculate_bbox_iou(box1: List[float], box2: List[float]) -> float:
 
 class SpatialIoUTracker:
     """
-    Tracks objects across sampled frames using Bounding Box Intersection-over-Union (IoU)
-    spatial association and class identity continuity.
+    Tracks objects across sampled frames using Bounding Box Intersection-over-Union (IoU),
+    gap-tolerant trajectory association, and state history transition modeling.
     """
 
-    def __init__(self, iou_threshold: float = 0.20):
+    def __init__(self, iou_threshold: float = 0.15, max_gap_sec: float = 8.0):
         self.iou_threshold = iou_threshold
+        self.max_gap_sec = max_gap_sec
 
     def track_entities(
         self,
@@ -45,7 +47,7 @@ class SpatialIoUTracker:
         frame_observations: List[FrameObservation]
     ) -> List[TrackedObject]:
         """
-        Build persistent TrackedObject trajectories using BBox IoU overlap matching.
+        Build persistent TrackedObject trajectories using BBox IoU overlap matching and state transitions.
         """
         active_tracks: Dict[str, TrackedObject] = {}
         class_counters: Dict[str, int] = {}
@@ -58,7 +60,6 @@ class SpatialIoUTracker:
             detections = frame_detections.get(frame.frame_id, [])
             vlm_obs = obs_by_frame.get(frame.frame_id)
 
-            # Match detections in current frame against active tracks of the same class
             matched_track_ids = set()
 
             for det in detections:
@@ -68,29 +69,32 @@ class SpatialIoUTracker:
                 best_match_id = None
                 best_iou = 0.0
 
-                # Search active tracks of same class
+                # Search active tracks of same class within gap tolerance
                 for track_id, track in active_tracks.items():
                     if track.object_type == cls_name and track_id not in matched_track_ids:
-                        last_pos = track.positions[-1]["bbox"] if track.positions else None
-                        if last_pos:
-                            iou = calculate_bbox_iou(det_bbox, last_pos)
-                            if iou >= self.iou_threshold and iou > best_iou:
-                                best_iou = iou
-                                best_match_id = track_id
+                        gap = frame.timestamp - track.last_seen
+                        if gap <= self.max_gap_sec:
+                            last_pos = track.positions[-1]["bbox"] if track.positions else None
+                            if last_pos:
+                                iou = calculate_bbox_iou(det_bbox, last_pos)
+                                if iou >= self.iou_threshold and iou > best_iou:
+                                    best_iou = iou
+                                    best_match_id = track_id
 
                 if best_match_id:
-                    # Match found -> update existing track
+                    # Match found -> update existing track trajectory
                     track = active_tracks[best_match_id]
                     det.track_id = best_match_id
                     matched_track_ids.add(best_match_id)
                     track.last_seen = frame.timestamp
                     track.positions.append({"timestamp": frame.timestamp, "bbox": det_bbox})
+                    track.state_history.append({"timestamp": frame.timestamp, "state": "tracked_position"})
                 else:
-                    # No match -> spawn new track
+                    # No match -> spawn new track with entity history
                     if cls_name not in class_counters:
                         class_counters[cls_name] = 1
 
-                    new_track_id = f"{cls_name}_{class_counters[cls_name]:02d}"
+                    new_track_id = f"{cls_name.capitalize()} #{class_counters[cls_name]}"
                     class_counters[cls_name] += 1
                     det.track_id = new_track_id
                     matched_track_ids.add(new_track_id)
@@ -104,6 +108,7 @@ class SpatialIoUTracker:
                         activities=[],
                         interactions=[],
                         lifecycle_events=["appeared"],
+                        state_history=[{"timestamp": frame.timestamp, "state": "appeared"}],
                     )
 
                 # Attach activities & interactions from VLM observations
@@ -119,7 +124,7 @@ class SpatialIoUTracker:
 
         tracked_list = list(active_tracks.values())
 
-        # Determine lifecycle events (e.g. moved, disappeared)
+        # Determine object lifecycle events and state transitions
         for trk in tracked_list:
             if len(trk.positions) > 1:
                 p_first = trk.positions[0]["bbox"]
@@ -129,6 +134,13 @@ class SpatialIoUTracker:
                 dist = float(np.hypot(center_last[0] - center_first[0], center_last[1] - center_first[1]))
                 if dist > 40.0 and "moved" not in trk.lifecycle_events:
                     trk.lifecycle_events.append("moved")
+                    trk.state_history.append({"timestamp": trk.last_seen, "state": "moved"})
+
+            # Check if entity exited visible frame before video end
+            if sorted_frames and (sorted_frames[-1].timestamp - trk.last_seen) > 5.0:
+                if "exited" not in trk.lifecycle_events:
+                    trk.lifecycle_events.append("exited")
+                    trk.state_history.append({"timestamp": trk.last_seen, "state": "exited"})
 
         logger.info(f"Spatial IoU Tracker built trajectories for {len(tracked_list)} distinct entities.")
         return tracked_list

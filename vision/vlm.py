@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, Any, Union, List
@@ -52,9 +53,17 @@ class VLMProvider(ABC):
         """Analyze an image with prompt and return parsed JSON dict response."""
         pass
 
+    def analyze_images(self, image_paths: List[Union[str, Path]], prompt: str) -> Dict[str, Any]:
+        """Analyze multiple consecutive frames with prompt for temporal comparison."""
+        # Default fallback: analyze middle frame if multi-image not specialized
+        if not image_paths:
+            return {}
+        mid_idx = len(image_paths) // 2
+        return self.analyze_image(image_paths[mid_idx], prompt)
+
 
 class GeminiVLMProvider(VLMProvider):
-    """Google Gemini VLM Provider implementation."""
+    """Google Gemini VLM Provider implementation with retry logic and strict grounding."""
 
     def __init__(self, api_key: str = "", model_name: str = "gemini-2.5-flash"):
         self.api_key = api_key or settings.VLM_API_KEY
@@ -70,30 +79,51 @@ class GeminiVLMProvider(VLMProvider):
                 logger.warning(f"Failed to initialize Gemini client: {e}")
 
     def analyze_image(self, image_path: Union[str, Path], prompt: str) -> Dict[str, Any]:
-        if not self.client:
-            logger.warning("Gemini API key missing or client uninitialized. Using mock VLM response.")
-            return MockVLMProvider().analyze_image(image_path, prompt)
+        return self.analyze_images([image_path], prompt)
 
-        path = Path(image_path)
-        try:
-            image = Image.open(path).convert("RGB")
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[image, prompt],
-            )
-            raw_text = response.text
-            parsed = parse_vlm_json_response(raw_text)
-            if parsed:
-                return parsed
-            logger.warning(f"Gemini output for {path.name} could not be parsed as JSON. Using mock fallback.")
-            return MockVLMProvider().analyze_image(image_path, prompt)
-        except Exception as e:
-            logger.error(f"Gemini VLM API error for {path.name}: {e}. Falling back to mock VLM.")
-            return MockVLMProvider().analyze_image(image_path, prompt)
+    def analyze_images(self, image_paths: List[Union[str, Path]], prompt: str) -> Dict[str, Any]:
+        if not self.client:
+            if settings.VLM_MOCK_MODE:
+                return MockVLMProvider().analyze_image(image_paths[0], prompt)
+            logger.warning(f"Gemini client not initialized and VLM_MOCK_MODE=False. Frame marked unanalyzed.")
+            return {}
+
+        paths = [Path(p) for p in image_paths if Path(p).exists()]
+        if not paths:
+            return {}
+
+        max_retries = settings.VLM_MAX_RETRIES
+        for attempt in range(1, max_retries + 1):
+            try:
+                images = [Image.open(p).convert("RGB") for p in paths]
+                contents = images + [prompt]
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                )
+                raw_text = response.text
+                parsed = parse_vlm_json_response(raw_text)
+                if parsed:
+                    return parsed
+
+                logger.warning(f"Gemini output for {[p.name for p in paths]} could not be parsed as JSON. Attempt {attempt}/{max_retries}.")
+            except Exception as e:
+                logger.warning(f"VLM request failed (Attempt {attempt}/{max_retries}) for {[p.name for p in paths]}: {e}")
+
+            if attempt < max_retries:
+                logger.info(f"VLM retry {attempt}")
+                time.sleep(0.5 * attempt)
+
+        if settings.VLM_MOCK_MODE:
+            logger.warning("VLM retries exhausted. Falling back to MockVLM (VLM_MOCK_MODE=True).")
+            return MockVLMProvider().analyze_image(paths[0], prompt)
+
+        logger.error(f"VLM retries exhausted for {[p.name for p in paths]}. Frame marked unavailable.")
+        return {}
 
 
 class OpenAIVLMProvider(VLMProvider):
-    """OpenAI Vision VLM Provider implementation."""
+    """OpenAI Vision VLM Provider implementation with retry logic and strict grounding."""
 
     def __init__(self, api_key: str = "", model_name: str = "gpt-4o-mini", base_url: str = ""):
         self.api_key = api_key or settings.VLM_API_KEY
@@ -113,41 +143,60 @@ class OpenAIVLMProvider(VLMProvider):
                 logger.warning(f"Failed to initialize OpenAI client: {e}")
 
     def analyze_image(self, image_path: Union[str, Path], prompt: str) -> Dict[str, Any]:
+        return self.analyze_images([image_path], prompt)
+
+    def analyze_images(self, image_paths: List[Union[str, Path]], prompt: str) -> Dict[str, Any]:
         if not self.client:
-            return MockVLMProvider().analyze_image(image_path, prompt)
+            if settings.VLM_MOCK_MODE:
+                return MockVLMProvider().analyze_image(image_paths[0], prompt)
+            logger.warning("OpenAI client not initialized and VLM_MOCK_MODE=False. Frame marked unanalyzed.")
+            return {}
 
         import base64
-        path = Path(image_path)
-        try:
-            with open(path, "rb") as f:
-                base64_image = base64.b64encode(f.read()).decode("utf-8")
+        paths = [Path(p) for p in image_paths if Path(p).exists()]
+        if not paths:
+            return {}
 
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
-                            },
-                        ],
-                    }
-                ],
-                response_format={"type": "json_object"},
-            )
-            content = response.choices[0].message.content
-            parsed = parse_vlm_json_response(content)
-            return parsed if parsed else MockVLMProvider().analyze_image(image_path, prompt)
-        except Exception as e:
-            logger.error(f"OpenAI VLM API error for {path.name}: {e}. Falling back to mock VLM.")
-            return MockVLMProvider().analyze_image(image_path, prompt)
+        max_retries = settings.VLM_MAX_RETRIES
+        for attempt in range(1, max_retries + 1):
+            try:
+                content_payload = [{"type": "text", "text": prompt}]
+                for p in paths:
+                    with open(p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                    content_payload.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    })
+
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": content_payload}],
+                    response_format={"type": "json_object"},
+                )
+                content = response.choices[0].message.content
+                parsed = parse_vlm_json_response(content)
+                if parsed:
+                    return parsed
+
+                logger.warning(f"OpenAI output for {[p.name for p in paths]} could not be parsed as JSON. Attempt {attempt}/{max_retries}.")
+            except Exception as e:
+                logger.warning(f"VLM request failed (Attempt {attempt}/{max_retries}) for {[p.name for p in paths]}: {e}")
+
+            if attempt < max_retries:
+                logger.info(f"VLM retry {attempt}")
+                time.sleep(0.5 * attempt)
+
+        if settings.VLM_MOCK_MODE:
+            logger.warning("VLM retries exhausted. Falling back to MockVLM (VLM_MOCK_MODE=True).")
+            return MockVLMProvider().analyze_image(paths[0], prompt)
+
+        logger.error(f"VLM retries exhausted for {[p.name for p in paths]}. Frame marked unavailable.")
+        return {}
 
 
 class MockVLMProvider(VLMProvider):
-    """Fallback Mock VLM provider for local testing and zero-cost simulation."""
+    """Fallback Mock VLM provider for explicit development/testing mode."""
 
     def analyze_image(self, image_path: Union[str, Path], prompt: str) -> Dict[str, Any]:
         path = Path(image_path)
@@ -159,7 +208,6 @@ class MockVLMProvider(VLMProvider):
                     "temporary_id": "Person #1",
                     "description": "Person sitting near desk wearing casual clothes",
                     "activity": "working at desk",
-                    "location": "center left",
                     "confidence": 0.92,
                 }
             ],
@@ -188,6 +236,9 @@ class MockVLMProvider(VLMProvider):
 
 def get_vlm_provider(provider_type: str = "") -> VLMProvider:
     """Factory function returning configured VLM provider instance."""
+    if settings.VLM_MOCK_MODE:
+        return MockVLMProvider()
+
     provider_name = (provider_type or settings.VLM_PROVIDER).lower()
     if provider_name == "gemini":
         return GeminiVLMProvider()

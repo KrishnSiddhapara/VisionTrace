@@ -45,7 +45,14 @@ class SampledFrame(BaseModel):
     frame_index: int
     path: str
     scene_id: int
-    sampling_reason: str = "uniform"  # 'scene_boundary', 'motion', 'uniform', etc.
+    sampling_reason: str = "uniform"  # 'movement_start', 'movement_peak', 'movement_end', 'major_visual_change', etc.
+    quality_score: float = 1.0
+    is_blurry: bool = False
+    content_hash: str = ""
+    motion_score: float = 0.0
+    change_score: float = 0.0
+    motion_area: float = 0.0
+    selection_reason: str = "movement_start"
 
 
 class YOLODetection(BaseModel):
@@ -83,6 +90,13 @@ class FrameObservation(BaseModel):
     visible_text: List[str] = Field(default_factory=list)
     observations: List[str] = Field(default_factory=list)
     uncertainties: List[str] = Field(default_factory=list)
+    confirmed_changes: List[str] = Field(default_factory=list)
+    possible_changes: List[str] = Field(default_factory=list)
+    evidence_strength: str = "HIGH"  # 'HIGH', 'MEDIUM', 'LOW', 'UNAVAILABLE'
+    quality_score: float = 1.0
+    is_analyzed: bool = True
+    motion_score: float = 0.0
+    selection_reason: str = "movement_start"
 
 
 class TrackedObject(BaseModel):
@@ -94,6 +108,7 @@ class TrackedObject(BaseModel):
     activities: List[str] = Field(default_factory=list)
     interactions: List[str] = Field(default_factory=list)
     lifecycle_events: List[str] = Field(default_factory=list)  # e.g., ["appeared", "picked_up", "moved"]
+    state_history: List[Dict[str, Any]] = Field(default_factory=list)  # [{'timestamp': 1.2, 'state': 'on_table'}]
 
 
 class VideoEvent(BaseModel):
@@ -104,8 +119,11 @@ class VideoEvent(BaseModel):
     subject: Optional[str] = None
     object: Optional[str] = None
     description: str
-    confidence: float = 0.9
+    confidence: float = 0.90
+    evidence_level: str = "CONFIRMED"  # 'CONFIRMED', 'PROBABLE', 'UNCERTAIN', 'REJECTED'
     evidence_frames: List[str] = Field(default_factory=list)
+    evidence_details: Dict[str, Any] = Field(default_factory=dict)
+    verification_status: str = "VERIFIED"
 
 
 class TemporalInsight(BaseModel):
@@ -127,6 +145,53 @@ class QAResponse(BaseModel):
     unknown_aspects: List[str] = Field(default_factory=list)
 
 
+class DeveloperMetrics(BaseModel):
+    total_video_frames: int = 0
+    candidate_movement_frames: int = 0
+    selected_change_frames: int = 0
+    static_frames_discarded: int = 0
+    frames_sampled: int = 0
+    frames_analyzed: int = 0
+    frames_skipped: int = 0
+    vlm_calls: int = 0
+    vlm_retries: int = 0
+    vlm_failures: int = 0
+    yolo_detections_count: int = 0
+    tracked_entities_count: int = 0
+    candidate_events_count: int = 0
+    verified_events_count: int = 0
+    rejected_events_count: int = 0
+    average_confidence: float = 0.0
+
+
+class FinalObjectRecord(BaseModel):
+    name: str
+    description: str
+    first_seen: str  # timestamp formatted e.g. "00:12"
+    last_seen: str   # timestamp formatted e.g. "00:48"
+    movement: str
+    state_changes: List[str] = Field(default_factory=list)
+    interactions: List[str] = Field(default_factory=list)
+    confidence: float = 0.90
+
+
+class FinalPersonRecord(BaseModel):
+    temporary_id: str  # "Person #1"
+    description: str
+    first_seen: str  # timestamp formatted e.g. "00:05"
+    last_seen: str   # timestamp formatted e.g. "00:52"
+    activities: List[str] = Field(default_factory=list)
+    movements: List[str] = Field(default_factory=list)
+    interactions: List[str] = Field(default_factory=list)
+    confidence: float = 0.89
+
+
+class FinalSummary(BaseModel):
+    objects: List[FinalObjectRecord] = Field(default_factory=list)
+    people: List[FinalPersonRecord] = Field(default_factory=list)
+    final_description: str = ""
+
+
 class VideoMemory(BaseModel):
     video_hash: str
     metadata: VideoMetadata
@@ -138,4 +203,6 @@ class VideoMemory(BaseModel):
     events: List[VideoEvent] = Field(default_factory=list)
     timeline: List[Dict[str, Any]] = Field(default_factory=list)
     summary: Dict[str, str] = Field(default_factory=dict)  # 'quick', 'standard', 'detailed', 'technical'
+    final_summary: Optional[FinalSummary] = None
     insights: List[TemporalInsight] = Field(default_factory=list)
+    developer_metrics: Optional[DeveloperMetrics] = None

@@ -22,9 +22,16 @@ class YOLOObjectDetector:
         except Exception as e:
             logger.warning(f"Could not initialize YOLO model ({e}). Fallback detector will be active.")
 
-    def detect_objects(self, image_path: Union[str, Path]) -> List[YOLODetection]:
+    def detect_objects(self, image_path: Union[str, Path], video_hash: str = "") -> List[YOLODetection]:
         path = Path(image_path)
-        cache_key = f"yolo_det_{path.name}_{self.conf_thresh}"
+        if not path.exists():
+            return []
+
+        cache_key = cache_manager.build_versioned_key(
+            prefix=f"yolo_det_{path.name}",
+            video_hash=video_hash,
+            model_name=f"{self.model_name}_{self.conf_thresh}",
+        )
 
         cached = cache_manager.get(cache_key)
         if cached:
@@ -53,8 +60,8 @@ class YOLOObjectDetector:
             except Exception as e:
                 logger.error(f"YOLO detection error on {path.name}: {e}")
 
-        if not detections:
-            # Simple fallback detection for testing
+        if not detections and settings.VLM_MOCK_MODE:
+            # Fallback mock detection ONLY when explicit VLM_MOCK_MODE is True
             detections = [
                 YOLODetection(
                     class_name="person",

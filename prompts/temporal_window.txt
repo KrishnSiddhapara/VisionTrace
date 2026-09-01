@@ -1,0 +1,51 @@
+You are analyzing three consecutive visual frames from a video sequence to detect ONLY visually supported temporal changes.
+
+Previous Frame (Index A):
+timestamp = {prev_timestamp}s
+
+Current Frame (Index B):
+timestamp = {curr_timestamp}s
+
+Next Frame (Index C):
+timestamp = {next_timestamp}s
+
+Compare the frames and determine:
+1. What changed between Previous, Current, and Next frames?
+2. Compare people, objects, positions, body stances, object states, and visual movement.
+3. DO NOT assume intention or inner emotion.
+4. DO NOT infer an action unless the transition is visually supported across the frames.
+
+Return ONLY a valid JSON object matching this schema:
+{
+  "environment": "string (e.g. indoor office, parking area)",
+  "previous_state": "string (observed visual state in previous frame)",
+  "current_state": "string (observed visual state in current frame)",
+  "next_state": "string (observed visual state in next frame)",
+  "confirmed_changes": ["string (visually verified state changes across frames)"],
+  "possible_changes": ["string (plausible but partially obscured changes)"],
+  "unknowns": ["string (anything visually ambiguous or uncertain)"],
+  "evidence_strength": "HIGH | MEDIUM | LOW | UNAVAILABLE",
+  "people": [
+    {
+      "temporary_id": "Person #1",
+      "description": "string (clothing, visible stance)",
+      "activity": "string (e.g. walking toward desk)",
+      "location": "string",
+      "confidence": 0.95
+    }
+  ],
+  "objects": [
+    {
+      "name": "string (e.g. backpack, laptop)",
+      "description": "string",
+      "location": "string",
+      "confidence": 0.95
+    }
+  ],
+  "activities": ["string (e.g. Person #1 walking)"],
+  "interactions": ["string (e.g. Person #1 reaching for backpack)"],
+  "relationships": ["string (e.g. backpack on table)"],
+  "visible_text": ["string"],
+  "observations": ["string (key observable physical facts)"],
+  "uncertainties": ["string"]
+}

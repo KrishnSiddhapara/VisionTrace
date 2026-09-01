@@ -24,7 +24,10 @@ class VideoProcessor:
         metadata = metadata_extractor.extract(path)
 
         # Cache check for scenes and frames
-        cache_key = f"video_ingest_{metadata.video_hash}"
+        cache_key = cache_manager.build_versioned_key(
+            prefix="video_ingest",
+            video_hash=metadata.video_hash,
+        )
         cached_data = cache_manager.get(cache_key)
         if cached_data:
             logger.info("Reusing cached scenes and sampled frames.")
