@@ -1,0 +1,7 @@
+Analyze the video memory for unusual visual patterns or state changes such as:
+- Sudden movement or rapid changes
+- Unexpected object appearance/disappearance
+- Person falling or rapid position shift
+- Unattended objects
+
+Always use objective, non-judgmental language (e.g. "Potential unusual event detected: Object placed on table at 01:22"). Never make legal or criminal claims.

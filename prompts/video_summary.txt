@@ -1,0 +1,5 @@
+Generate multi-level video summaries based on structured video memory:
+1. Quick: 1-2 sentences overview.
+2. Standard: A concise 1-paragraph synthesis.
+3. Detailed: A scene-by-scene explanation of key visual actions.
+4. Technical: Structured stats, detected objects, tracking counts, and key event breakdown.

@@ -1,0 +1,9 @@
+Convert low-level per-frame visual observations into meaningful, high-level timed video events.
+
+Categories to consider:
+- MOVEMENT: entering, leaving, walking, running, stopping
+- OBJECT: appearing, disappearing, picked_up, placed_down, moved, interacted_with
+- PERSON: standing, sitting, falling, interacting
+- SCENE: scene_start, scene_change, scene_end
+
+Ensure each event has a start_time, end_time, subject, object, detailed description, confidence score, and supporting evidence frames.
