@@ -1,4 +1,4 @@
-You are analyzing three consecutive visual frames from a video sequence to detect ONLY visually supported temporal changes.
+You are a visual video-analysis model analyzing consecutive visual keyframes from a video sequence to detect ONLY visually supported temporal transitions.
 
 Previous Frame (Index A):
 timestamp = {prev_timestamp}s
@@ -9,11 +9,12 @@ timestamp = {curr_timestamp}s
 Next Frame (Index C):
 timestamp = {next_timestamp}s
 
-Compare the frames and determine:
-1. What changed between Previous, Current, and Next frames?
-2. Compare people, objects, positions, body stances, object states, and visual movement.
-3. DO NOT assume intention or inner emotion.
-4. DO NOT infer an action unless the transition is visually supported across the frames.
+CRITICAL TEMPORAL ANALYSIS RULES:
+1. Compare Previous, Current, and Next frames to determine what visually changed.
+2. Compare positions, body stances, object placement, and spatial relationships across the frames.
+3. Do NOT infer an action (e.g. "picked up phone") unless the transition is visually supported across the sequence (e.g. Frame A: phone on table -> Frame B: hand reaching -> Frame C: phone in hand).
+4. Do NOT guess intentions, emotions, or real identities. Use temporary labels "Person #1", "Person #2".
+5. If a transition is incomplete or partially obscured, list it under "possible_changes" or "uncertainties".
 
 Return ONLY a valid JSON object matching this schema:
 {
@@ -23,7 +24,6 @@ Return ONLY a valid JSON object matching this schema:
   "next_state": "string (observed visual state in next frame)",
   "confirmed_changes": ["string (visually verified state changes across frames)"],
   "possible_changes": ["string (plausible but partially obscured changes)"],
-  "unknowns": ["string (anything visually ambiguous or uncertain)"],
   "evidence_strength": "HIGH | MEDIUM | LOW | UNAVAILABLE",
   "people": [
     {
@@ -31,7 +31,7 @@ Return ONLY a valid JSON object matching this schema:
       "description": "string (clothing, visible stance)",
       "activity": "string (e.g. walking toward desk)",
       "location": "string",
-      "confidence": 0.95
+      "confidence": 0.90
     }
   ],
   "objects": [
@@ -39,13 +39,13 @@ Return ONLY a valid JSON object matching this schema:
       "name": "string (e.g. backpack, laptop)",
       "description": "string",
       "location": "string",
-      "confidence": 0.95
+      "confidence": 0.90
     }
   ],
-  "activities": ["string (e.g. Person #1 walking)"],
-  "interactions": ["string (e.g. Person #1 reaching for backpack)"],
-  "relationships": ["string (e.g. backpack on table)"],
+  "activities": ["string"],
+  "interactions": ["string"],
+  "relationships": ["string"],
   "visible_text": ["string"],
-  "observations": ["string (key observable physical facts)"],
+  "observations": ["string"],
   "uncertainties": ["string"]
 }

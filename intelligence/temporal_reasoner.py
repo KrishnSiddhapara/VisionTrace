@@ -213,18 +213,14 @@ class TemporalReasoner:
         # 3. Generate Chronological Final Description
         chronological_events = [t for t in timeline if t.get("description")]
         if chronological_events:
-            lines = []
+            lines = [f"📌 **Overview**: Video '{metadata.filename}' spans {metadata.duration_sec:.1f}s across {len(scenes)} scenes."]
             for item in chronological_events:
                 t_str = item.get("formatted_time", f"{item.get('timestamp', 0):.1f}s")
                 desc = item.get("description", "")
-                lines.append(f"At [{t_str}], {desc.lower() if desc and not desc.startswith('At') else desc}.")
-            
-            final_desc = (
-                f"The video '{metadata.filename}' spans {metadata.duration_sec:.1f} seconds across {len(scenes)} visual scenes. "
-                + " ".join(lines)
-            )
+                lines.append(f"⏱️ **[{t_str}]**: {desc}")
+            final_desc = "\n\n".join(lines)
         else:
-            final_desc = f"The video '{metadata.filename}' spans {metadata.duration_sec:.1f} seconds. Insufficient visual change events were detected to construct a detailed movement narrative."
+            final_desc = f"📌 **Overview**: Video '{metadata.filename}' spans {metadata.duration_sec:.1f}s.\n\n⚠️ Insufficient visual change events were detected to construct a detailed movement narrative."
 
         # Attempt VLM Final Reasoning if available
         vlm_provider = get_vlm_provider()

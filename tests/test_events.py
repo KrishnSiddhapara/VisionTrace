@@ -23,6 +23,7 @@ class TestEvents(unittest.TestCase):
                 object_type="person",
                 first_seen=1.0,
                 last_seen=9.0,
+                lifecycle_events=["moved"],
             )
         ]
 

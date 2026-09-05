@@ -130,26 +130,34 @@ class FrameAnalyzer:
                     )
                 )
 
-        evidence_str = raw_json.get("evidence_strength", "HIGH")
+        env_str = raw_json.get("environment") or "Unknown environment"
+        evidence_str = raw_json.get("evidence_strength") or "HIGH"
         if sampled_frame.is_blurry or sampled_frame.quality_score < 0.6:
             evidence_str = "MEDIUM" if evidence_str == "HIGH" else "LOW"
+
+        def _ensure_list(val: Any) -> List[str]:
+            if isinstance(val, list):
+                return [str(item) for item in val if item is not None]
+            elif isinstance(val, str) and val.strip():
+                return [val.strip()]
+            return []
 
         observation = FrameObservation(
             frame_id=sampled_frame.frame_id,
             timestamp=sampled_frame.timestamp,
             scene_id=sampled_frame.scene_id,
-            environment=raw_json.get("environment", "Unknown environment"),
+            environment=str(env_str),
             people=people_obs,
             objects=objects_obs,
-            activities=raw_json.get("activities", []),
-            interactions=raw_json.get("interactions", []),
-            relationships=raw_json.get("relationships", []),
-            visible_text=raw_json.get("visible_text", []),
-            observations=raw_json.get("observations", []),
-            uncertainties=raw_json.get("uncertainties", []),
-            confirmed_changes=raw_json.get("confirmed_changes", []),
-            possible_changes=raw_json.get("possible_changes", []),
-            evidence_strength=evidence_str,
+            activities=_ensure_list(raw_json.get("activities")),
+            interactions=_ensure_list(raw_json.get("interactions")),
+            relationships=_ensure_list(raw_json.get("relationships")),
+            visible_text=_ensure_list(raw_json.get("visible_text")),
+            observations=_ensure_list(raw_json.get("observations")),
+            uncertainties=_ensure_list(raw_json.get("uncertainties")),
+            confirmed_changes=_ensure_list(raw_json.get("confirmed_changes")),
+            possible_changes=_ensure_list(raw_json.get("possible_changes")),
+            evidence_strength=str(evidence_str),
             quality_score=sampled_frame.quality_score,
             is_analyzed=True,
             motion_score=sampled_frame.motion_score,

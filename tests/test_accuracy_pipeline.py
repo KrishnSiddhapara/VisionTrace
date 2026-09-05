@@ -112,5 +112,25 @@ class TestAccuracyPipeline(unittest.TestCase):
             finally:
                 settings.VLM_MOCK_MODE = original_mock_setting
 
+    def test_fresh_analysis_same_video_twice(self):
+        """Verify that analyzing the same video twice generates unique analysis hashes without cache hits."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "test_duplicate.mp4"
+            fps = 30.0
+            width, height = 320, 240
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            out = cv2.VideoWriter(str(video_path), fourcc, fps, (width, height))
+            for i in range(30):
+                frame = np.full((height, width, 3), (i * 5, i * 5, i * 5), dtype=np.uint8)
+                out.write(frame)
+            out.release()
+
+            from frontend.dashboard import run_full_pipeline
+
+            mem1 = run_full_pipeline(video_path, sampling_mode="Fast")
+            mem2 = run_full_pipeline(video_path, sampling_mode="Fast")
+
+            self.assertNotEqual(mem1.video_hash, mem2.video_hash)
+
 if __name__ == "__main__":
     unittest.main()

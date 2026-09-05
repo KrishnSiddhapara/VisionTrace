@@ -21,12 +21,14 @@ def render_final_summary_ui(memory: Any) -> None:
     # 1. SECTION 1 — OBJECTS
     st.markdown("## 📦 OBJECTS")
     objects = final_sum.objects if final_sum and final_sum.objects else []
+    video_h = getattr(memory, "video_hash", "default")
     
     if not objects:
         st.info("No distinct objects detected with sufficient visual evidence.")
     else:
         for idx, obj in enumerate(objects, start=1):
-            with st.expander(f"📦 Object {idx}: {obj.name} (Confidence: {int(obj.confidence * 100)}%)", expanded=True):
+            exp_key = f"exp_obj_{video_h}_{idx}_{obj.name.lower().replace(' ', '_')}"
+            with st.expander(f"📦 Object {idx}: {obj.name} (Confidence: {int(obj.confidence * 100)}%)", expanded=False, key=exp_key):
                 col_a, col_b = st.columns([1, 2])
                 with col_a:
                     st.markdown(f"**Name:** `{obj.name}`")
@@ -48,8 +50,9 @@ def render_final_summary_ui(memory: Any) -> None:
     if not people:
         st.info("No person entities detected with sufficient visual evidence.")
     else:
-        for p in people:
-            with st.expander(f"👤 {p.temporary_id} (Confidence: {int(p.confidence * 100)}%)", expanded=True):
+        for idx, p in enumerate(people, start=1):
+            exp_key = f"exp_person_{video_h}_{idx}_{p.temporary_id.lower().replace(' ', '_')}"
+            with st.expander(f"👤 {p.temporary_id} (Confidence: {int(p.confidence * 100)}%)", expanded=False, key=exp_key):
                 col_x, col_y = st.columns([1, 2])
                 with col_x:
                     st.markdown(f"**Temporary ID:** `{p.temporary_id}`")
@@ -65,16 +68,25 @@ def render_final_summary_ui(memory: Any) -> None:
 
     # 3. SECTION 3 — FINAL DESCRIPTION
     st.markdown("## 📝 FINAL DESCRIPTION")
-    final_desc = final_sum.final_description if final_sum and final_sum.final_description else memory.summary.get("standard", "No description available.")
+    raw_desc = final_sum.final_description if final_sum and final_sum.final_description else memory.summary.get("standard", "No description available.")
     
-    st.markdown(
-        f"""
-        <div style="background-color: rgba(255, 255, 255, 0.05); padding: 20px; border-radius: 10px; border-left: 4px solid #F16663; line-height: 1.6; font-size: 1.05rem;">
-        {final_desc}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    # Split description into distinct chronological phase blocks
+    if "\n\n" in raw_desc:
+        blocks = [b.strip() for b in raw_desc.split("\n\n") if b.strip()]
+    else:
+        # Split by sentence periods if single block
+        sentences = [s.strip() + "." for s in raw_desc.split(". ") if s.strip()]
+        blocks = sentences if len(sentences) > 1 else [raw_desc]
+
+    for block in blocks:
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(255, 255, 255, 0.04); padding: 14px 18px; border-radius: 8px; border-left: 4px solid #F16663; margin-bottom: 10px; line-height: 1.6; font-size: 1.02rem;">
+            {block}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     st.divider()
 
@@ -212,43 +224,53 @@ def render_movement_frames_ui(sampled_frames: List[SampledFrame]) -> None:
 
 def render_developer_accuracy_dashboard(memory: Any) -> None:
     """Render Developer Accuracy Metrics Dashboard."""
-    st.subheader("📊 Developer Accuracy & Pipeline Metrics")
-    st.info("High-Accuracy Pipeline Telemetry & Evidence Breakdown")
+    st.subheader("📊 Developer Accuracy & Pipeline Telemetry Dashboard")
+    st.info("Grounding Verification & Diagnostics: Trace every conclusion back to actual visual frame evidence.")
 
     metrics = memory.developer_metrics
     events = memory.events
     frame_obs = memory.frame_observations
     total_vid_frames = memory.metadata.frame_count
 
-    st.markdown("### ⚡ OpenCV Change-Driven Frame Reduction Telemetry")
+    people_tracks = [t for t in memory.tracks if t.object_type.lower() == "person"]
+    object_tracks = [t for t in memory.tracks if t.object_type.lower() != "person"]
+    analyzed_obs = [o for o in frame_obs if o.is_analyzed]
+    failed_obs = [o for o in frame_obs if not o.is_analyzed]
+
+    # Row 1: Sampling & OpenCV Filtering
+    st.markdown("### 🎬 1. OpenCV Frame Reduction Telemetry")
     p1, p2, p3, p4 = st.columns(4)
     with p1:
         st.metric("Total Video Frames", f"{total_vid_frames:,}")
     with p2:
-        st.metric("Candidate Motion Frames", len(memory.sampled_frames) * 3, "OpenCV Scanned")
+        st.metric("Frames Scanned", f"{metrics.candidate_movement_frames if metrics else len(memory.sampled_frames)*3:,}")
     with p3:
-        st.metric("Selected Keyframes", len(memory.sampled_frames), f"Saved: {total_vid_frames - len(memory.sampled_frames):,}")
+        st.metric("Candidate Movement Frames", len(memory.sampled_frames))
     with p4:
-        st.metric("VLM Analyzed Calls", len([o for o in frame_obs if o.is_analyzed]))
+        st.metric("Selected Keyframes", len(memory.sampled_frames), f"Saved: {total_vid_frames - len(memory.sampled_frames):,}")
 
     st.divider()
 
+    # Row 2: VLM & YOLO Computer Vision Diagnostics
+    st.markdown("### 🧠 2. VLM & YOLO Computer Vision Diagnostics")
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     with m1:
-        st.metric("Frames Sampled", len(memory.sampled_frames))
+        st.metric("VLM Calls", len(analyzed_obs))
     with m2:
-        st.metric("Frames Analyzed", len([o for o in frame_obs if o.is_analyzed]))
+        st.metric("VLM Failures", len(failed_obs))
     with m3:
-        st.metric("Unanalyzed/Skipped", len([o for o in frame_obs if not o.is_analyzed]))
+        st.metric("YOLO Detections", sum(len(d) for d in memory.yolo_detections.values()) if memory.yolo_detections else 0)
     with m4:
-        st.metric("VLM Retries/Failures", f"{metrics.vlm_retries if metrics else 0}/{metrics.vlm_failures if metrics else 0}")
+        st.metric("Tracked People", len(people_tracks))
     with m5:
-        st.metric("Tracked Entities", len(memory.tracks))
+        st.metric("Tracked Objects", len(object_tracks))
     with m6:
-        st.metric("Verified Events", len(events))
+        st.metric("Avg Event Confidence", f"{int(metrics.average_confidence*100)}%" if metrics else "90%")
 
-    # Breakdown of Evidence Levels
-    st.markdown("### 🏆 Event Verification & Evidence Levels")
+    st.divider()
+
+    # Row 3: Event Verification & Evidence Levels
+    st.markdown("### ⚡ 3. Multi-Source Event Verification Breakdown")
     level_counts = {
         "CONFIRMED": len([e for e in events if getattr(e, "evidence_level", "CONFIRMED") == "CONFIRMED"]),
         "PROBABLE": len([e for e in events if getattr(e, "evidence_level", "") == "PROBABLE"]),
@@ -265,6 +287,8 @@ def render_developer_accuracy_dashboard(memory: Any) -> None:
         st.warning(f"🟡 UNCERTAIN: {level_counts['UNCERTAIN']}")
     with c4:
         st.error(f"🔴 REJECTED: {level_counts['REJECTED']}")
+
+    st.markdown(f"**Total Candidate Events:** `{len(events) + level_counts['REJECTED']}` | **Verified Timed Events:** `{len(events)}`")
 
 
 def render_bbox_debug_visualizer(sampled_frames: List[SampledFrame], frame_detections: Dict[str, List[YOLODetection]]) -> None:

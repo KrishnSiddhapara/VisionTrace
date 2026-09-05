@@ -23,20 +23,27 @@ class EventDetector:
         Returns (confidence, evidence_level).
         """
         # Base VLM strength score
-        vlm_score = 0.90 if vlm_evidence_strength == "HIGH" else (0.75 if vlm_evidence_strength == "MEDIUM" else 0.60)
-        
+        if vlm_evidence_strength == "HIGH":
+            vlm_score = 0.90
+        elif vlm_evidence_strength == "MEDIUM":
+            vlm_score = 0.75
+        elif vlm_evidence_strength == "LOW":
+            vlm_score = 0.60
+        else:
+            vlm_score = 0.40  # UNAVAILABLE
+
         # Frame support ratio
-        frame_ratio = min(1.0, supporting_frame_count / max(1, total_window_frames))
+        frame_ratio = min(1.0, supporting_frame_count / max(2, total_window_frames))
         
         # Multi-source weighted combination
         score = (
             0.35 * vlm_score +
-            0.30 * frame_ratio +
-            0.20 * (1.0 if has_tracking_support else 0.5) +
-            0.15 * (1.0 if has_state_change else 0.6)
+            0.25 * frame_ratio +
+            0.20 * (1.0 if has_tracking_support else 0.4) +
+            0.20 * (1.0 if has_state_change else 0.5)
         )
-        score *= min(1.0, max(0.5, avg_quality_score))
-        confidence = round(float(min(0.99, max(0.20, score))), 2)
+        score *= min(1.0, max(0.4, avg_quality_score))
+        confidence = round(float(min(0.99, max(0.10, score))), 2)
 
         if confidence >= 0.85 and (supporting_frame_count >= 2 or has_tracking_support or has_state_change):
             level = "CONFIRMED"
@@ -150,13 +157,12 @@ class EventDetector:
         tracks: List[TrackedObject]
     ) -> List[VideoEvent]:
         """
-        Execute full Event Verification Pipeline.
+        Execute full Multi-Source Event Verification Pipeline.
         """
         events: List[VideoEvent] = []
         event_counter = 1
 
         sorted_obs = sorted(frame_observations, key=lambda o: o.timestamp)
-        obs_by_frame = {o.frame_id: o for o in sorted_obs}
         track_ids = {trk.track_id for trk in tracks}
 
         # 1. Scene Boundary Events
@@ -178,38 +184,36 @@ class EventDetector:
             )
             event_counter += 1
 
-        # 2. Track Trajectory & Entity State Change Events
+        # 2. Entity Lifecycle & Movement Events (ONLY for distinct physical movements/exits)
         for trk in tracks:
-            duration = trk.last_seen - trk.first_seen
-            if duration < 0.1:
-                continue
-
-            conf, level = self.calculate_event_confidence(
-                supporting_frame_count=len(trk.positions),
-                total_window_frames=max(1, len(sorted_obs)),
-                has_tracking_support=True,
-                has_state_change="moved" in trk.lifecycle_events or "exited" in trk.lifecycle_events,
-                vlm_evidence_strength="HIGH",
-                avg_quality_score=1.0,
-            )
-
-            if level != "REJECTED":
-                events.append(
-                    VideoEvent(
-                        event_id=f"evt_{event_counter:03d}",
-                        start_time=trk.first_seen,
-                        end_time=trk.last_seen,
-                        event_type="PERSON" if trk.object_type == "person" else "OBJECT",
-                        subject=trk.track_id,
-                        object=None,
-                        description=f"{trk.track_id} observed from {trk.first_seen:.1f}s to {trk.last_seen:.1f}s.",
-                        confidence=conf,
-                        evidence_level=level,
-                        evidence_frames=[],
-                        verification_status="VERIFIED",
-                    )
+            if "moved" in trk.lifecycle_events or "exited" in trk.lifecycle_events:
+                conf, level = self.calculate_event_confidence(
+                    supporting_frame_count=len(trk.positions),
+                    total_window_frames=max(1, len(sorted_obs)),
+                    has_tracking_support=True,
+                    has_state_change=True,
+                    vlm_evidence_strength="HIGH",
+                    avg_quality_score=1.0,
                 )
-                event_counter += 1
+
+                if level != "REJECTED":
+                    action_label = "moved across the scene" if "moved" in trk.lifecycle_events else "exited visible area"
+                    events.append(
+                        VideoEvent(
+                            event_id=f"evt_{event_counter:03d}",
+                            start_time=trk.first_seen,
+                            end_time=trk.last_seen,
+                            event_type="PERSON" if trk.object_type == "person" else "OBJECT",
+                            subject=trk.track_id,
+                            object=None,
+                            description=f"{trk.track_id} {action_label} between {trk.first_seen:.1f}s–{trk.last_seen:.1f}s.",
+                            confidence=conf,
+                            evidence_level=level,
+                            evidence_frames=[],
+                            verification_status="VERIFIED",
+                        )
+                    )
+                    event_counter += 1
 
         # 3. Merged Candidate Activity Verification
         candidate_groups = self.merge_consecutive_activities(sorted_obs, tracks)
@@ -223,7 +227,11 @@ class EventDetector:
             vlm_strengths = group["vlm_strengths"]
 
             avg_q = float(sum(q_scores) / max(1, len(q_scores)))
-            top_vlm_strength = "HIGH" if "HIGH" in vlm_strengths else ("MEDIUM" if "MEDIUM" in vlm_strengths else "LOW")
+            top_vlm_strength = "HIGH" if "HIGH" in vlm_strengths else ("MEDIUM" if "MEDIUM" in vlm_strengths else ("LOW" if "LOW" in vlm_strengths else "UNAVAILABLE"))
+
+            if top_vlm_strength == "UNAVAILABLE":
+                # Do not emit event if VLM evidence is completely missing
+                continue
 
             # Check tracking association
             has_tracking = any(

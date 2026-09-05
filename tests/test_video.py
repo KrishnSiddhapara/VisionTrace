@@ -61,5 +61,35 @@ class TestVideoProcessing(unittest.TestCase):
             self.assertAlmostEqual(meta.duration_sec, 2.0, delta=0.1)
             self.assertNotEqual(meta.video_hash, "")
 
+            # 3. Path sanitization test for moved directory
+            from models.schemas import VideoMemory, SampledFrame
+            from intelligence.video_memory import video_memory_manager
+            from config.settings import settings
+
+            stale_filepath = r"C:\Users\old_user\Desktop\visiontrace ai\uploads\test_synthetic.mp4"
+            stale_sf_path = r"C:\Users\old_user\Desktop\visiontrace ai\processed\hash123\frames\test_frame.jpg"
+
+            # Create actual uploaded file in UPLOADS_DIR
+            actual_upload = settings.UPLOADS_DIR / "test_synthetic.mp4"
+            actual_upload.write_bytes(video_path.read_bytes())
+
+            meta.filepath = stale_filepath
+            sf = SampledFrame(
+                frame_id="frame_0001",
+                timestamp=0.0,
+                frame_index=0,
+                path=stale_sf_path,
+                scene_id=1,
+            )
+            mem = VideoMemory(video_hash="test_hash_sanitize", metadata=meta, sampled_frames=[sf])
+            sanitized = video_memory_manager._sanitize_memory_paths(mem)
+
+            self.assertEqual(Path(sanitized.metadata.filepath).resolve(), actual_upload.resolve())
+
+            # Cleanup test upload file
+            if actual_upload.exists():
+                actual_upload.unlink()
+
 if __name__ == "__main__":
     unittest.main()
+

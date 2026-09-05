@@ -1,3 +1,6 @@
+import uuid
+from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 import streamlit as st
 
@@ -6,7 +9,7 @@ from video.processor import video_processor
 from video.sampler import frame_sampler
 from vision.frame_analyzer import frame_analyzer
 from vision.object_detector import object_detector
-from vision.tracker import object_tracker
+from vision.tracker import SpatialIoUTracker
 from intelligence.event_detector import event_detector
 from intelligence.temporal_reasoner import temporal_reasoner
 from intelligence.key_moment_detector import key_moment_detector
@@ -31,6 +34,24 @@ from frontend.analytics_ui import (
 )
 from utils.logger import logger
 
+@dataclass
+class AnalysisContext:
+    analysis_id: str
+    upload_timestamp: str
+    video_path: Path
+    video_metadata: Any = None
+    memory: Any = None
+
+
+def reset_analysis_state() -> None:
+    """Clear all analysis-specific session state variables on new upload."""
+    st.session_state["metadata"] = None
+    st.session_state["memory"] = None
+    st.session_state["video_path"] = None
+    st.session_state["analysis_id"] = None
+    st.session_state["current_upload_name"] = None
+
+
 def init_session_state() -> None:
     """Initialize Streamlit session state keys."""
     if "metadata" not in st.session_state:
@@ -41,22 +62,45 @@ def init_session_state() -> None:
         st.session_state["memory"] = None
     if "sampling_mode" not in st.session_state:
         st.session_state["sampling_mode"] = "Balanced"
+    if "analysis_id" not in st.session_state:
+        st.session_state["analysis_id"] = None
+    if "current_upload_name" not in st.session_state:
+        st.session_state["current_upload_name"] = None
 
 
 def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> VideoMemory:
-    """Execute complete 12-phase accuracy upgrade processing pipeline."""
-    progress_bar = st.progress(0, text="Initializing high-accuracy video processing pipeline...")
+    """Execute fresh, un-cached 12-phase processing pipeline."""
+    analysis_id = str(uuid.uuid4())
+    timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    logger.info("========================================")
+    logger.info("NEW VIDEO ANALYSIS")
+    logger.info("========================================")
+    logger.info(f"Analysis ID: {analysis_id}")
+    logger.info(f"Upload timestamp: {timestamp_str}")
+    logger.info(f"Filename: {video_path.name}")
+    logger.info(f"Analysis version: {settings.ANALYSIS_VERSION}")
+    logger.info("Cache: DISABLED")
+    logger.info("Fresh analysis: YES")
+    logger.info("========================================")
+
+    st.session_state["analysis_id"] = analysis_id
+
+    progress_bar = st.progress(0, text=f"Initializing fresh analysis pipeline (ID: {analysis_id[:8]})...")
 
     # Step 1: Validation & Metadata
     progress_bar.progress(10, text="✓ Step 1/8: Validating video & extracting metadata...")
     validation, metadata, scenes, _ = video_processor.process_video(video_path)
 
-    # Check cached memory
-    cache_key_hash = f"{metadata.video_hash}_{sampling_mode.lower()}"
-    existing_mem = video_memory_manager.load_memory(cache_key_hash)
-    if existing_mem:
-        progress_bar.progress(100, text="✓ Loaded cached VideoMemory.")
-        return existing_mem
+    # Bypass cached memory check if DISABLE_VIDEO_CACHE is True
+    if not getattr(settings, "DISABLE_VIDEO_CACHE", True):
+        cache_key_hash = f"{metadata.video_hash}_{sampling_mode.lower()}"
+        existing_mem = video_memory_manager.load_memory(cache_key_hash)
+        if existing_mem:
+            if video_path.exists():
+                existing_mem.metadata.filepath = str(video_path.resolve())
+            progress_bar.progress(100, text="✓ Loaded cached VideoMemory.")
+            return existing_mem
 
     # Step 2: Intelligent Multi-Criteria Sampler (Pass 1)
     progress_bar.progress(25, text=f"● Step 2/8: Extracting motion-adaptive representative frames ({sampling_mode} Mode)...")
@@ -86,9 +130,10 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
         dets = object_detector.detect_objects(sf.path, video_hash=metadata.video_hash)
         yolo_dets[sf.frame_id] = dets
 
-    # Step 5: Bounding Box IoU Spatial Tracking
-    progress_bar.progress(65, text="● Step 5/8: Tracking entities with gap-tolerant IoU spatial matcher...")
-    tracks = object_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
+    # Step 5: Fresh Spatial Bounding Box IoU Entity Tracker Reset
+    progress_bar.progress(65, text="● Step 5/8: Tracking entities with fresh spatial IoU matcher...")
+    fresh_tracker = SpatialIoUTracker()
+    tracks = fresh_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
 
     # Step 6: Initial Candidate Events & Pass 2 Dense Sampling
     progress_bar.progress(75, text="● Step 6/8: Identifying candidate events & extracting Pass 2 dense frames...")
@@ -108,7 +153,7 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
 
     # Step 7: Event Verification Pipeline & Confidence Calculation
     progress_bar.progress(85, text="● Step 7/8: Running multi-source event verification & confidence scoring...")
-    tracks = object_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
+    tracks = fresh_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
     verified_events = event_detector.detect_events(scenes, frame_obs_list, tracks)
 
     # Step 8: Temporal Reasoning & Memory Telemetry
@@ -141,7 +186,7 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
     )
 
     memory = VideoMemory(
-        video_hash=cache_key_hash,
+        video_hash=f"{metadata.video_hash}_{analysis_id[:8]}",
         metadata=metadata,
         scenes=scenes,
         sampled_frames=sampled_frames,
@@ -157,7 +202,7 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
     )
 
     video_memory_manager.save_memory(memory)
-    progress_bar.progress(100, text="✅ High-Accuracy Pipeline Complete!")
+    progress_bar.progress(100, text=f"✅ Fresh Pipeline Complete (Analysis ID: {analysis_id[:8]})!")
     return memory
 
 
@@ -184,6 +229,7 @@ def render_dashboard() -> None:
         st.markdown(f"**Mock Mode:** `{settings.VLM_MOCK_MODE}`")
         st.markdown(f"**YOLO Threshold:** `{settings.YOLO_CONFIDENCE}`")
         st.markdown(f"**Analysis Ver:** `{settings.ANALYSIS_VERSION}`")
+        st.markdown(f"**Cache Disabled:** `{settings.DISABLE_VIDEO_CACHE}`")
 
         st.divider()
         st.markdown("### 🚫 Scope Restriction")
@@ -199,13 +245,21 @@ def render_dashboard() -> None:
     )
 
     if uploaded_file is not None:
+        # Detect new upload and clear stale state
+        if st.session_state.get("current_upload_name") != uploaded_file.name:
+            reset_analysis_state()
+            st.session_state["current_upload_name"] = uploaded_file.name
+
         save_path = settings.UPLOADS_DIR / uploaded_file.name
         with open(save_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
         st.session_state["video_path"] = save_path
 
-        if st.button("🚀 Process Video with High-Accuracy Pipeline", type="primary"):
+        if st.button("🚀 Process Video with Fresh High-Accuracy Pipeline", type="primary"):
+            # Clear previous result before starting fresh pipeline run
+            st.session_state["memory"] = None
+            st.session_state["metadata"] = None
             memory = run_full_pipeline(save_path, sampling_mode=sampling_mode)
             st.session_state["memory"] = memory
             st.session_state["metadata"] = memory.metadata

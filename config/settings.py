@@ -22,7 +22,7 @@ class Settings:
     MAX_VIDEO_DURATION_SEC: float = float(os.getenv("MAX_VIDEO_DURATION_SEC", "600"))
     DEFAULT_SAMPLE_INTERVAL_SEC: float = float(os.getenv("DEFAULT_SAMPLE_INTERVAL_SEC", "5"))
     MAX_VLM_FRAMES: int = int(os.getenv("MAX_VLM_FRAMES", "100"))
-    YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.40"))
+    YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.45"))
     # OpenCV Movement & Visual Change Detection Settings
     MOTION_THRESHOLD: float = float(os.getenv("MOTION_THRESHOLD", "25.0"))
     CHANGE_THRESHOLD: float = float(os.getenv("CHANGE_THRESHOLD", "0.08"))
@@ -43,9 +43,10 @@ class Settings:
     VLM_BASE_URL: str = os.getenv("VLM_BASE_URL", "")
     VLM_MOCK_MODE: bool = os.getenv("VLM_MOCK_MODE", "False").lower() in ("true", "1", "yes")
     VLM_MAX_RETRIES: int = int(os.getenv("VLM_MAX_RETRIES", "3"))
-    ANALYSIS_VERSION: str = "2.0-accuracy"
-    VLM_PROMPT_VERSION: str = "2.0"
+    ANALYSIS_VERSION: str = "3.0-accuracy-grounded"
+    VLM_PROMPT_VERSION: str = "3.0"
     DEVELOPER_MODE: bool = os.getenv("DEVELOPER_MODE", "True").lower() in ("true", "1", "yes")
+    DISABLE_VIDEO_CACHE: bool = os.getenv("DISABLE_VIDEO_CACHE", "True").lower() in ("true", "1", "yes")
 
     def ensure_directories(self) -> None:
         """Ensure all required directories exist."""

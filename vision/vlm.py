@@ -83,9 +83,9 @@ class GeminiVLMProvider(VLMProvider):
 
     def analyze_images(self, image_paths: List[Union[str, Path]], prompt: str) -> Dict[str, Any]:
         if not self.client:
-            if settings.VLM_MOCK_MODE:
+            if settings.VLM_MOCK_MODE or settings.VLM_PROVIDER == "mock":
                 return MockVLMProvider().analyze_image(image_paths[0], prompt)
-            logger.warning(f"Gemini client not initialized and VLM_MOCK_MODE=False. Frame marked unanalyzed.")
+            logger.warning(f"[VLM Telemetry] Gemini client not initialized (API Key missing or invalid) and VLM_MOCK_MODE=False. Frame marked unanalyzed.")
             return {}
 
         paths = [Path(p) for p in image_paths if Path(p).exists()]
@@ -94,6 +94,7 @@ class GeminiVLMProvider(VLMProvider):
 
         max_retries = settings.VLM_MAX_RETRIES
         for attempt in range(1, max_retries + 1):
+            start_t = time.time()
             try:
                 images = [Image.open(p).convert("RGB") for p in paths]
                 contents = images + [prompt]
@@ -101,24 +102,35 @@ class GeminiVLMProvider(VLMProvider):
                     model=self.model_name,
                     contents=contents,
                 )
+                duration = round(time.time() - start_t, 2)
                 raw_text = response.text
                 parsed = parse_vlm_json_response(raw_text)
                 if parsed:
+                    logger.info(
+                        f"[VLM Telemetry] SUCCESS | Model: {self.model_name} | Frames: {[p.name for p in paths]} | "
+                        f"Attempt: {attempt}/{max_retries} | Duration: {duration}s | Status: PARSED_OK"
+                    )
                     return parsed
 
-                logger.warning(f"Gemini output for {[p.name for p in paths]} could not be parsed as JSON. Attempt {attempt}/{max_retries}.")
+                logger.warning(
+                    f"[VLM Telemetry] JSON_PARSE_FAIL | Model: {self.model_name} | Frames: {[p.name for p in paths]} | "
+                    f"Attempt: {attempt}/{max_retries} | Duration: {duration}s"
+                )
             except Exception as e:
-                logger.warning(f"VLM request failed (Attempt {attempt}/{max_retries}) for {[p.name for p in paths]}: {e}")
+                duration = round(time.time() - start_t, 2)
+                logger.warning(
+                    f"[VLM Telemetry] REQUEST_FAIL | Model: {self.model_name} | Frames: {[p.name for p in paths]} | "
+                    f"Attempt: {attempt}/{max_retries} | Duration: {duration}s | Error: {e}"
+                )
 
             if attempt < max_retries:
-                logger.info(f"VLM retry {attempt}")
                 time.sleep(0.5 * attempt)
 
-        if settings.VLM_MOCK_MODE:
-            logger.warning("VLM retries exhausted. Falling back to MockVLM (VLM_MOCK_MODE=True).")
+        if settings.VLM_MOCK_MODE or settings.VLM_PROVIDER == "mock":
+            logger.warning("[VLM Telemetry] Retries exhausted. Explicit Mock Mode enabled -> returning MockVLM.")
             return MockVLMProvider().analyze_image(paths[0], prompt)
 
-        logger.error(f"VLM retries exhausted for {[p.name for p in paths]}. Frame marked unavailable.")
+        logger.error(f"[VLM Telemetry] FAILED_ALL_RETRIES | Frames: {[p.name for p in paths]} | Frame marked unavailable.")
         return {}
 
 
@@ -147,9 +159,9 @@ class OpenAIVLMProvider(VLMProvider):
 
     def analyze_images(self, image_paths: List[Union[str, Path]], prompt: str) -> Dict[str, Any]:
         if not self.client:
-            if settings.VLM_MOCK_MODE:
+            if settings.VLM_MOCK_MODE or settings.VLM_PROVIDER == "mock":
                 return MockVLMProvider().analyze_image(image_paths[0], prompt)
-            logger.warning("OpenAI client not initialized and VLM_MOCK_MODE=False. Frame marked unanalyzed.")
+            logger.warning("[VLM Telemetry] OpenAI client not initialized and VLM_MOCK_MODE=False. Frame marked unanalyzed.")
             return {}
 
         import base64
@@ -159,6 +171,7 @@ class OpenAIVLMProvider(VLMProvider):
 
         max_retries = settings.VLM_MAX_RETRIES
         for attempt in range(1, max_retries + 1):
+            start_t = time.time()
             try:
                 content_payload = [{"type": "text", "text": prompt}]
                 for p in paths:
@@ -174,33 +187,44 @@ class OpenAIVLMProvider(VLMProvider):
                     messages=[{"role": "user", "content": content_payload}],
                     response_format={"type": "json_object"},
                 )
+                duration = round(time.time() - start_t, 2)
                 content = response.choices[0].message.content
                 parsed = parse_vlm_json_response(content)
                 if parsed:
+                    logger.info(
+                        f"[VLM Telemetry] SUCCESS | Model: {self.model_name} | Frames: {[p.name for p in paths]} | "
+                        f"Attempt: {attempt}/{max_retries} | Duration: {duration}s | Status: PARSED_OK"
+                    )
                     return parsed
 
-                logger.warning(f"OpenAI output for {[p.name for p in paths]} could not be parsed as JSON. Attempt {attempt}/{max_retries}.")
+                logger.warning(
+                    f"[VLM Telemetry] JSON_PARSE_FAIL | Model: {self.model_name} | Frames: {[p.name for p in paths]} | "
+                    f"Attempt: {attempt}/{max_retries} | Duration: {duration}s"
+                )
             except Exception as e:
-                logger.warning(f"VLM request failed (Attempt {attempt}/{max_retries}) for {[p.name for p in paths]}: {e}")
+                duration = round(time.time() - start_t, 2)
+                logger.warning(
+                    f"[VLM Telemetry] REQUEST_FAIL | Model: {self.model_name} | Frames: {[p.name for p in paths]} | "
+                    f"Attempt: {attempt}/{max_retries} | Duration: {duration}s | Error: {e}"
+                )
 
             if attempt < max_retries:
-                logger.info(f"VLM retry {attempt}")
                 time.sleep(0.5 * attempt)
 
-        if settings.VLM_MOCK_MODE:
-            logger.warning("VLM retries exhausted. Falling back to MockVLM (VLM_MOCK_MODE=True).")
+        if settings.VLM_MOCK_MODE or settings.VLM_PROVIDER == "mock":
+            logger.warning("[VLM Telemetry] Retries exhausted. Explicit Mock Mode enabled -> returning MockVLM.")
             return MockVLMProvider().analyze_image(paths[0], prompt)
 
-        logger.error(f"VLM retries exhausted for {[p.name for p in paths]}. Frame marked unavailable.")
+        logger.error(f"[VLM Telemetry] FAILED_ALL_RETRIES | Frames: {[p.name for p in paths]} | Frame marked unavailable.")
         return {}
 
 
 class MockVLMProvider(VLMProvider):
-    """Fallback Mock VLM provider for explicit development/testing mode."""
+    """Fallback Mock VLM provider for explicit development/testing mode ONLY."""
 
     def analyze_image(self, image_path: Union[str, Path], prompt: str) -> Dict[str, Any]:
         path = Path(image_path)
-        logger.info(f"Mock VLM analyzing frame {path.name}")
+        logger.info(f"[Mock VLM] Explicit Mock Mode active for frame {path.name}")
         return {
             "environment": "Indoor workplace / study area",
             "people": [
@@ -236,13 +260,13 @@ class MockVLMProvider(VLMProvider):
 
 def get_vlm_provider(provider_type: str = "") -> VLMProvider:
     """Factory function returning configured VLM provider instance."""
-    if settings.VLM_MOCK_MODE:
-        return MockVLMProvider()
-
     provider_name = (provider_type or settings.VLM_PROVIDER).lower()
-    if provider_name == "gemini":
+    if settings.VLM_MOCK_MODE or provider_name == "mock":
+        return MockVLMProvider()
+    elif provider_name == "gemini":
         return GeminiVLMProvider()
     elif provider_name in ("openai", "custom"):
         return OpenAIVLMProvider()
     else:
-        return MockVLMProvider()
+        logger.warning(f"Unknown VLM provider '{provider_name}'. Defaulting to GeminiVLMProvider.")
+        return GeminiVLMProvider()

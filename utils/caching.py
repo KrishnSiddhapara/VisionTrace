@@ -34,6 +34,9 @@ class CacheManager:
         return f"{prefix}_{video_hash}_{content_hash}_{m_name}_{p_ver}_{a_ver}"
 
     def get(self, key: str) -> Optional[Any]:
+        if getattr(settings, "DISABLE_VIDEO_CACHE", True):
+            return None
+
         cache_file = self._get_cache_path(key)
         if cache_file.exists():
             try:

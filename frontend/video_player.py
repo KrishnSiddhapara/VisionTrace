@@ -1,4 +1,6 @@
+from pathlib import Path
 import streamlit as st
+from config.settings import settings
 from models.schemas import VideoMetadata
 from utils.time_utils import seconds_to_timestamp
 from frontend.components import render_metric_card
@@ -10,7 +12,18 @@ def render_video_player(metadata: VideoMetadata) -> None:
     with col1:
         st.subheader("🎥 Video Player")
         st.markdown('<div class="video-wrapper">', unsafe_allow_html=True)
-        st.video(metadata.filepath)
+        
+        v_path = Path(metadata.filepath) if metadata.filepath else None
+        if v_path and not v_path.exists():
+            fallback_path = settings.UPLOADS_DIR / metadata.filename
+            if fallback_path.exists():
+                v_path = fallback_path
+                metadata.filepath = str(v_path.resolve())
+
+        if v_path and v_path.exists():
+            st.video(str(v_path))
+        else:
+            st.warning(f"⚠️ Video file not found at `{metadata.filepath}`. Please re-upload the video.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     with col2:
