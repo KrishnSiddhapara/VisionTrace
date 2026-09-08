@@ -16,9 +16,10 @@ CRITICAL EVIDENCE-GROUNDING RULES:
 5. Merge repeated activities and movement descriptions into cohesive chronological summaries.
 6. Preserve temporary person IDs and timestamps.
 7. Focus strictly on what visually changed over time.
-8. Describe the video chronologically in "final_description".
-9. Do NOT analyze audio.
-10. Return ONLY a raw, valid JSON object matching the exact schema below.
+8. Under "objects", list ONLY MAIN, RELEVANT objects (e.g. sports ball, laptop, phone, backpack, vehicle, tool, or objects undergoing state change/movement). Omit unnecessary static background clutter (wall, floor, ceiling, sky, ground, static furniture).
+9. Describe the video chronologically in "final_description".
+10. Do NOT analyze audio.
+11. Return ONLY a raw, valid JSON object matching the exact schema below.
 
 JSON Schema:
 {

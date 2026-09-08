@@ -102,6 +102,7 @@ class FrameObservation(BaseModel):
 class TrackedObject(BaseModel):
     track_id: str
     object_type: str
+    canonical_name: str = ""
     first_seen: float
     last_seen: float
     positions: List[Dict[str, Any]] = Field(default_factory=list)  # [{'timestamp': 1.2, 'bbox': [...]}]
@@ -109,6 +110,8 @@ class TrackedObject(BaseModel):
     interactions: List[str] = Field(default_factory=list)
     lifecycle_events: List[str] = Field(default_factory=list)  # e.g., ["appeared", "picked_up", "moved"]
     state_history: List[Dict[str, Any]] = Field(default_factory=list)  # [{'timestamp': 1.2, 'state': 'on_table'}]
+    detection_count: int = 1
+    avg_confidence: float = 0.90
 
 
 class VideoEvent(BaseModel):
@@ -156,6 +159,7 @@ class DeveloperMetrics(BaseModel):
     vlm_calls: int = 0
     vlm_retries: int = 0
     vlm_failures: int = 0
+    yolo_confidence_threshold: float = 0.45
     yolo_detections_count: int = 0
     tracked_entities_count: int = 0
     candidate_events_count: int = 0

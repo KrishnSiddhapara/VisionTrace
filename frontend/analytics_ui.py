@@ -137,12 +137,15 @@ def render_objects_and_tracks_ui(tracks: List[TrackedObject]) -> None:
 
     data = []
     for trk in tracks:
+        norm_cat = getattr(trk, "canonical_name", "") or trk.object_type
         data.append({
             "Track ID": trk.track_id,
-            "Entity Type": trk.object_type.capitalize(),
+            "Canonical Category": norm_cat.capitalize(),
+            "Raw Class": trk.object_type.capitalize(),
             "First Seen": f"{trk.first_seen:.2f}s",
             "Last Seen": f"{trk.last_seen:.2f}s",
-            "Observed Frames": len(trk.positions),
+            "Detections": getattr(trk, "detection_count", len(trk.positions)),
+            "Avg Conf": f"{int(getattr(trk, 'avg_confidence', 0.90)*100)}%",
             "Lifecycle Events": ", ".join(trk.lifecycle_events) if trk.lifecycle_events else "None",
             "Activities": ", ".join(trk.activities) if trk.activities else "Observed in scene",
         })
@@ -259,7 +262,8 @@ def render_developer_accuracy_dashboard(memory: Any) -> None:
     with m2:
         st.metric("VLM Failures", len(failed_obs))
     with m3:
-        st.metric("YOLO Detections", sum(len(d) for d in memory.yolo_detections.values()) if memory.yolo_detections else 0)
+        y_conf = getattr(metrics, "yolo_confidence_threshold", 0.45) if metrics else 0.45
+        st.metric("YOLO Detections", sum(len(d) for d in memory.yolo_detections.values()) if memory.yolo_detections else 0, f"Conf: {y_conf:.2f}")
     with m4:
         st.metric("Tracked People", len(people_tracks))
     with m5:

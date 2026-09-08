@@ -3,6 +3,77 @@ from typing import List, Dict, Any, Tuple
 from models.schemas import SampledFrame, YOLODetection, TrackedObject, FrameObservation
 from utils.logger import logger
 
+CLASS_NORMALIZATION_MAP = {
+    # Sports balls
+    "sports ball": "sports ball",
+    "soccer ball": "sports ball",
+    "football": "sports ball",
+    "basketball": "sports ball",
+    "tennis ball": "sports ball",
+    "baseball": "sports ball",
+    "volleyball": "sports ball",
+    "ball": "sports ball",
+
+    # People
+    "person": "person",
+    "human": "person",
+    "man": "person",
+    "woman": "person",
+    "boy": "person",
+    "girl": "person",
+    "player": "person",
+
+    # Bags & Luggage
+    "backpack": "backpack",
+    "bag": "backpack",
+    "handbag": "backpack",
+    "suitcase": "backpack",
+
+    # Electronics
+    "laptop": "laptop",
+    "computer": "laptop",
+    "cell phone": "cell phone",
+    "phone": "cell phone",
+    "mobile phone": "cell phone",
+    "smartphone": "cell phone",
+
+    # Vehicles
+    "car": "car",
+    "vehicle": "car",
+    "automobile": "car",
+}
+
+
+UNNECESSARY_BACKGROUND_CLASSES = {
+    "wall", "floor", "ceiling", "ground", "pavement", "road", "sky", "building",
+    "window", "door", "curtain", "light", "shelf", "cabinet", "room", "background",
+    "tree", "grass", "bench", "couch", "bed", "chair", "table", "desk", "dining table",
+}
+
+
+def is_main_object(cls_name: str, has_movement_or_interaction: bool = False) -> bool:
+    """
+    Check if an object category is a main, relevant visual object.
+    Filters out unnecessary static background elements (wall, floor, table, etc.)
+    unless they actively undergo movement or interaction in the frame.
+    """
+    if not cls_name:
+        return False
+    clean = cls_name.strip().lower()
+    norm = CLASS_NORMALIZATION_MAP.get(clean, clean)
+    if norm in UNNECESSARY_BACKGROUND_CLASSES or clean in UNNECESSARY_BACKGROUND_CLASSES:
+        return has_movement_or_interaction
+    return True
+
+
+def normalize_class_name(cls_name: str) -> str:
+    """Normalize object class names into canonical visual categories."""
+    if not cls_name:
+        return "object"
+    clean = cls_name.strip().lower()
+    return CLASS_NORMALIZATION_MAP.get(clean, clean)
+
+
 def calculate_bbox_iou(box1: List[float], box2: List[float]) -> float:
     """
     Calculate Intersection-over-Union (IoU) between two bounding boxes [x1, y1, x2, y2].
@@ -30,10 +101,22 @@ def calculate_bbox_iou(box1: List[float], box2: List[float]) -> float:
     return round(float(inter_area / union_area), 4)
 
 
+def calculate_center_distance(box1: List[float], box2: List[float]) -> float:
+    """Calculate Euclidean distance between bounding box centers."""
+    if not box1 or not box2 or len(box1) < 4 or len(box2) < 4:
+        return float("inf")
+    cx1 = (box1[0] + box1[2]) / 2.0
+    cy1 = (box1[1] + box1[3]) / 2.0
+    cx2 = (box2[0] + box2[2]) / 2.0
+    cy2 = (box2[1] + box2[3]) / 2.0
+    return float(np.hypot(cx2 - cx1, cy2 - cy1))
+
+
 class SpatialIoUTracker:
     """
-    Tracks objects across sampled frames using Bounding Box Intersection-over-Union (IoU),
-    gap-tolerant trajectory association, and state history transition modeling.
+    Tracks objects across sampled frames using class normalization, Bounding Box IoU,
+    center-distance motion trajectory association, gap-tolerant occlusion handling,
+    and state transition modeling.
     """
 
     def __init__(self, iou_threshold: float = 0.15, max_gap_sec: float = 8.0):
@@ -47,7 +130,7 @@ class SpatialIoUTracker:
         frame_observations: List[FrameObservation]
     ) -> List[TrackedObject]:
         """
-        Build persistent TrackedObject trajectories using BBox IoU overlap matching and state transitions.
+        Build persistent TrackedObject trajectories across frames.
         """
         active_tracks: Dict[str, TrackedObject] = {}
         class_counters: Dict[str, int] = {}
@@ -63,22 +146,35 @@ class SpatialIoUTracker:
             matched_track_ids = set()
 
             for det in detections:
-                cls_name = det.class_name
+                raw_cls = det.class_name
+                norm_cls = normalize_class_name(raw_cls)
                 det_bbox = det.bbox
 
                 best_match_id = None
-                best_iou = 0.0
+                best_score = 0.0
 
-                # Search active tracks of same class within gap tolerance
+                # Search active tracks of same normalized class within gap tolerance
                 for track_id, track in active_tracks.items():
-                    if track.object_type == cls_name and track_id not in matched_track_ids:
+                    track_norm_cls = normalize_class_name(track.canonical_name or track.object_type)
+                    if track_norm_cls == norm_cls and track_id not in matched_track_ids:
                         gap = frame.timestamp - track.last_seen
                         if gap <= self.max_gap_sec:
                             last_pos = track.positions[-1]["bbox"] if track.positions else None
                             if last_pos:
                                 iou = calculate_bbox_iou(det_bbox, last_pos)
-                                if iou >= self.iou_threshold and iou > best_iou:
-                                    best_iou = iou
+                                dist = calculate_center_distance(det_bbox, last_pos)
+                                box_size = max(last_pos[2] - last_pos[0], last_pos[3] - last_pos[1], 30.0)
+                                norm_dist = dist / box_size
+
+                                score = 0.0
+                                if iou >= self.iou_threshold:
+                                    score = 0.6 + 0.4 * iou
+                                elif norm_dist <= 3.0 or dist <= 150.0:
+                                    # Motion / displacement match for moving objects (e.g. ball, walking person)
+                                    score = max(0.05, 0.5 - 0.1 * norm_dist)
+
+                                if score > 0.0 and score > best_score:
+                                    best_score = score
                                     best_match_id = track_id
 
                 if best_match_id:
@@ -87,21 +183,29 @@ class SpatialIoUTracker:
                     det.track_id = best_match_id
                     matched_track_ids.add(best_match_id)
                     track.last_seen = frame.timestamp
+                    track.detection_count += 1
+                    # Update average confidence
+                    track.avg_confidence = round(
+                        (track.avg_confidence * (track.detection_count - 1) + det.confidence) / track.detection_count,
+                        3
+                    )
                     track.positions.append({"timestamp": frame.timestamp, "bbox": det_bbox})
                     track.state_history.append({"timestamp": frame.timestamp, "state": "tracked_position"})
                 else:
                     # No match -> spawn new track with entity history
-                    if cls_name not in class_counters:
-                        class_counters[cls_name] = 1
+                    display_cls = "Ball" if norm_cls == "sports ball" else norm_cls.capitalize()
+                    if display_cls not in class_counters:
+                        class_counters[display_cls] = 1
 
-                    new_track_id = f"{cls_name.capitalize()} #{class_counters[cls_name]}"
-                    class_counters[cls_name] += 1
+                    new_track_id = f"{display_cls} #{class_counters[display_cls]}"
+                    class_counters[display_cls] += 1
                     det.track_id = new_track_id
                     matched_track_ids.add(new_track_id)
 
                     active_tracks[new_track_id] = TrackedObject(
                         track_id=new_track_id,
-                        object_type=cls_name,
+                        object_type=raw_cls,
+                        canonical_name=norm_cls,
                         first_seen=frame.timestamp,
                         last_seen=frame.timestamp,
                         positions=[{"timestamp": frame.timestamp, "bbox": det_bbox}],
@@ -109,6 +213,8 @@ class SpatialIoUTracker:
                         interactions=[],
                         lifecycle_events=["appeared"],
                         state_history=[{"timestamp": frame.timestamp, "state": "appeared"}],
+                        detection_count=1,
+                        avg_confidence=det.confidence,
                     )
 
                 # Attach activities & interactions from VLM observations
@@ -144,5 +250,6 @@ class SpatialIoUTracker:
 
         logger.info(f"Spatial IoU Tracker built trajectories for {len(tracked_list)} distinct entities.")
         return tracked_list
+
 
 object_tracker = SpatialIoUTracker()

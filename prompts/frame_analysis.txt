@@ -9,6 +9,7 @@ CRITICAL EVIDENCE-GROUNDING RULES:
 4. Do NOT infer ownership (e.g. do not say "his laptop" or "her bag" unless a person is actively holding it).
 5. If an action or object is visually ambiguous, blurry, or uncertain, list it explicitly under "uncertainties".
 6. Focus on observable physical facts, visible clothing, body stances, object placement, and physical state.
+7. Under "objects", list ONLY MAIN, RELEVANT objects (e.g. sports ball, laptop, phone, backpack, vehicle, tool, or items undergoing movement or state change). Do NOT list unnecessary static background structural elements (such as wall, floor, ceiling, sky, ground, static desk, static chair) unless they are actively being moved or interacted with.
 
 Return ONLY a raw, valid JSON object matching this exact schema:
 {

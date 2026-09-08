@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from typing import Any, Optional
 from config.settings import settings
@@ -10,6 +11,7 @@ class CacheManager:
     def __init__(self, cache_dir: Path = settings.PROCESSED_DIR):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
 
     def _get_cache_path(self, key: str) -> Path:
         safe_key = "".join([c if c.isalnum() or c in ("-", "_") else "_" for c in key])
@@ -34,37 +36,39 @@ class CacheManager:
         return f"{prefix}_{video_hash}_{content_hash}_{m_name}_{p_ver}_{a_ver}"
 
     def get(self, key: str) -> Optional[Any]:
-        if getattr(settings, "DISABLE_VIDEO_CACHE", True):
+        if getattr(settings, "DISABLE_VIDEO_CACHE", False):
             return None
 
         cache_file = self._get_cache_path(key)
-        if cache_file.exists():
-            try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Check version compatibility if stored
-                    if isinstance(data, dict) and "_cache_version" in data:
-                        if data["_cache_version"] != settings.ANALYSIS_VERSION:
-                            logger.info(f"Invalidating cache for key {key} due to version mismatch.")
-                            cache_file.unlink(missing_ok=True)
-                            return None
-                    logger.info(f"Cache HIT for key: {key}")
-                    return data
-            except Exception as e:
-                logger.warning(f"Error reading cache file {cache_file}: {e}")
-                return None
-        return None
+        with self._lock:
+            if cache_file.exists():
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        # Check version compatibility if stored
+                        if isinstance(data, dict) and "_cache_version" in data:
+                            if data["_cache_version"] != settings.ANALYSIS_VERSION:
+                                logger.info(f"Invalidating cache for key {key} due to version mismatch.")
+                                cache_file.unlink(missing_ok=True)
+                                return None
+                        logger.info(f"Cache HIT for key: {key}")
+                        return data
+                except Exception as e:
+                    logger.warning(f"Error reading cache file {cache_file}: {e}")
+                    return None
+            return None
 
     def set(self, key: str, value: Any) -> None:
         cache_file = self._get_cache_path(key)
-        try:
-            if isinstance(value, dict):
-                value["_cache_version"] = settings.ANALYSIS_VERSION
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(value, f, indent=2, default=str)
-            logger.info(f"Cache SET for key: {key}")
-        except Exception as e:
-            logger.error(f"Failed to write cache for key {key}: {e}")
+        with self._lock:
+            try:
+                if isinstance(value, dict):
+                    value["_cache_version"] = settings.ANALYSIS_VERSION
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(value, f, indent=2, default=str)
+                logger.info(f"Cache SET for key: {key}")
+            except Exception as e:
+                logger.error(f"Failed to write cache for key {key}: {e}")
 
     def has(self, key: str) -> bool:
         return self._get_cache_path(key).exists()

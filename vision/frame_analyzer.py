@@ -8,6 +8,14 @@ from vision.quality import frame_quality_checker
 from utils.logger import logger
 from utils.caching import cache_manager
 
+def _ensure_list(val: Any) -> List[str]:
+    if isinstance(val, list):
+        return [str(item) for item in val if item is not None]
+    elif isinstance(val, str) and val.strip():
+        return [val.strip()]
+    return []
+
+
 class FrameAnalyzer:
     """Analyzes sampled frames using structured VLM output, temporal windows, and visual quality evaluation."""
 
@@ -63,6 +71,18 @@ class FrameAnalyzer:
         if cached:
             return FrameObservation(**cached)
 
+        # 2b. Perceptual Content Hash Deduplication (Avoid identical VLM API requests)
+        if content_hash:
+            dedup_key = f"vlm_content_hash_{video_hash}_{content_hash}"
+            dup_cached = cache_manager.get(dedup_key)
+            if dup_cached:
+                logger.info(f"[VLM Deduplication] Reusing VLM observation for frame {sampled_frame.frame_id} (identical content hash: {content_hash[:8]}).")
+                dup_obs = FrameObservation(**dup_cached)
+                dup_obs.frame_id = sampled_frame.frame_id
+                dup_obs.timestamp = sampled_frame.timestamp
+                dup_obs.scene_id = sampled_frame.scene_id
+                return dup_obs
+
         logger.info(f"Analyzing frame window {sampled_frame.frame_id} (timestamp: {sampled_frame.timestamp}s, quality: {sampled_frame.quality_score})...")
 
         # 3. Build temporal window frame list & prompt
@@ -117,30 +137,30 @@ class FrameAnalyzer:
                     )
                 )
 
-        # 6. Parse object observations
+        # 6. Parse main object observations (Filter out unnecessary static background clutter)
+        from vision.tracker import is_main_object
+        confirmed_changes = _ensure_list(raw_json.get("confirmed_changes"))
+        interactions = _ensure_list(raw_json.get("interactions"))
+
         objects_obs = []
         for o in raw_json.get("objects", []):
             if isinstance(o, dict):
-                objects_obs.append(
-                    ObjectObservation(
-                        name=o.get("name", "object"),
-                        description=o.get("description"),
-                        location=o.get("location"),
-                        confidence=float(o.get("confidence", 0.9)),
+                o_name = o.get("name", "object")
+                has_change = any(o_name.lower() in item.lower() for item in confirmed_changes + interactions)
+                if is_main_object(o_name, has_movement_or_interaction=has_change):
+                    objects_obs.append(
+                        ObjectObservation(
+                            name=o_name,
+                            description=o.get("description"),
+                            location=o.get("location"),
+                            confidence=float(o.get("confidence", 0.9)),
+                        )
                     )
-                )
 
         env_str = raw_json.get("environment") or "Unknown environment"
         evidence_str = raw_json.get("evidence_strength") or "HIGH"
         if sampled_frame.is_blurry or sampled_frame.quality_score < 0.6:
             evidence_str = "MEDIUM" if evidence_str == "HIGH" else "LOW"
-
-        def _ensure_list(val: Any) -> List[str]:
-            if isinstance(val, list):
-                return [str(item) for item in val if item is not None]
-            elif isinstance(val, str) and val.strip():
-                return [val.strip()]
-            return []
 
         observation = FrameObservation(
             frame_id=sampled_frame.frame_id,
@@ -165,7 +185,11 @@ class FrameAnalyzer:
         )
 
         # Cache valid result
-        cache_manager.set(cache_key, observation.model_dump())
+        obs_dict = observation.model_dump()
+        cache_manager.set(cache_key, obs_dict)
+        if content_hash:
+            dedup_key = f"vlm_content_hash_{video_hash}_{content_hash}"
+            cache_manager.set(dedup_key, obs_dict)
         return observation
 
     def analyze_frame(self, sampled_frame: SampledFrame, prev_obs: FrameObservation = None) -> FrameObservation:

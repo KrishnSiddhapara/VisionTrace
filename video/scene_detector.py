@@ -17,7 +17,7 @@ class SceneDetector:
 
         try:
             from scenedetect import detect, ContentDetector
-            scene_list = detect(str(path), ContentDetector())
+            scene_list = detect(str(path), ContentDetector(), show_progress=False)
             logger.info(f"PySceneDetect found {len(scene_list)} scenes in {path.name}")
 
             for idx, (start_time, end_time) in enumerate(scene_list, start=1):

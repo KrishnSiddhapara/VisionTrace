@@ -5,6 +5,7 @@ from models.schemas import (
     SampledFrame, FinalSummary, FinalObjectRecord, FinalPersonRecord
 )
 from vision.vlm import get_vlm_provider
+from vision.tracker import normalize_class_name
 from config.settings import settings
 from utils.logger import logger
 
@@ -127,68 +128,86 @@ class TemporalReasoner:
         Generate structured evidence-grounded FinalSummary (OBJECTS, PEOPLE, FINAL DESCRIPTION).
         Combines deduplicated object records, temporary person entity tracks, and chronological visual narrative.
         """
-        # 1. Deduplicate & Aggregate Objects
-        object_map: Dict[str, Dict[str, Any]] = {}
-        for trk in tracks:
-            if trk.object_type.lower() != "person":
-                obj_name = trk.object_type.capitalize()
-                if obj_name not in object_map:
-                    m_s, s_s = divmod(trk.first_seen, 60)
-                    m_e, s_e = divmod(trk.last_seen, 60)
-                    object_map[obj_name] = {
-                        "name": obj_name,
-                        "description": f"{obj_name} detected in scene.",
-                        "first_seen": f"{int(m_s):02d}:{s_s:04.1f}",
-                        "last_seen": f"{int(m_e):02d}:{s_e:04.1f}",
-                        "movement": ", ".join(trk.lifecycle_events) if trk.lifecycle_events else "Observed in scene",
-                        "state_changes": [s.get("state", "") for s in trk.state_history if s.get("state")],
-                        "interactions": trk.interactions,
-                        "confidence": 0.90,
-                    }
-                else:
-                    m_e, s_e = divmod(trk.last_seen, 60)
-                    object_map[obj_name]["last_seen"] = f"{int(m_e):02d}:{s_e:04.1f}"
+        # 1. Deduplicate & Aggregate Objects using canonical PhysicalObjectRegistry
+        from vision.object_registry import physical_object_registry
+        physical_objects = physical_object_registry.reconcile_tracks(tracks, frame_observations)
 
-        # Also pull objects from VLM frame observations
+        final_objects = []
+        covered_categories = set()
+
+        non_person_phys = [
+            po for po in physical_objects
+            if po.canonical_name != "person"
+        ]
+
+        for po in non_person_phys:
+            m_s, s_s = divmod(po.first_seen, 60)
+            m_e, s_e = divmod(po.last_seen, 60)
+            covered_categories.add(po.canonical_name)
+
+            display_name = "Ball" if po.canonical_name == "sports ball" else po.object_id
+            final_objects.append(
+                FinalObjectRecord(
+                    name=display_name,
+                    description=f"{display_name} physical object trajectory ({', '.join(po.track_ids)}).",
+                    first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
+                    last_seen=f"{int(m_e):02d}:{s_e:04.1f}",
+                    movement=", ".join(po.lifecycle_events) if po.lifecycle_events else "Observed in scene",
+                    state_changes=[],
+                    interactions=po.interactions,
+                    confidence=round(po.avg_confidence, 2),
+                )
+            )
+
+        # Also pull objects from VLM frame observations ONLY if category not covered by tracks & is a main object
+        from vision.tracker import is_main_object
+        vlm_added_cats = set()
         for obs in frame_observations:
             for o in obs.objects:
-                name = o.name.capitalize()
-                if name.lower() != "person" and name not in object_map:
-                    m_s, s_s = divmod(obs.timestamp, 60)
-                    object_map[name] = {
-                        "name": name,
-                        "description": o.description or f"{name} visible in frame",
-                        "first_seen": f"{int(m_s):02d}:{s_s:04.1f}",
-                        "last_seen": f"{int(m_s):02d}:{s_s:04.1f}",
-                        "movement": "Observed in frame keyframes",
-                        "state_changes": obs.confirmed_changes,
-                        "interactions": obs.interactions,
-                        "confidence": round(float(o.confidence or 0.88), 2),
-                    }
-
-        final_objects = [FinalObjectRecord(**v) for v in object_map.values()]
+                norm_cat = normalize_class_name(o.name)
+                has_change = any(o.name.lower() in item.lower() for item in obs.confirmed_changes + obs.interactions)
+                if norm_cat != "person" and norm_cat not in covered_categories and norm_cat not in vlm_added_cats:
+                    if is_main_object(o.name, has_movement_or_interaction=has_change):
+                        m_s, s_s = divmod(obs.timestamp, 60)
+                        display_name = o.name.capitalize()
+                        vlm_added_cats.add(norm_cat)
+                        final_objects.append(
+                            FinalObjectRecord(
+                                name=display_name,
+                                description=o.description or f"{display_name} visible in frame keyframes",
+                                first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
+                                last_seen=f"{int(m_s):02d}:{s_s:04.1f}",
+                                movement="Observed in frame keyframes",
+                                state_changes=obs.confirmed_changes,
+                                interactions=obs.interactions,
+                                confidence=round(float(o.confidence or 0.88), 2),
+                            )
+                        )
 
         # 2. Aggregate People Entities
-        person_tracks = [t for t in tracks if t.object_type.lower() == "person"]
+        person_phys = [
+            po for po in physical_objects
+            if po.canonical_name == "person"
+        ]
         final_people = []
 
-        for i, trk in enumerate(person_tracks, start=1):
-            m_s, s_s = divmod(trk.first_seen, 60)
-            m_e, s_e = divmod(trk.last_seen, 60)
+        for i, po in enumerate(person_phys, start=1):
+            m_s, s_s = divmod(po.first_seen, 60)
+            m_e, s_e = divmod(po.last_seen, 60)
 
-            activities = trk.activities or ["Navigating scene area"]
-            movements = trk.lifecycle_events or ["Entered visible area", "Moved across scene"]
+            activities = po.activities or ["Navigating scene area"]
+            movements = po.lifecycle_events or ["Entered visible area", "Moved across scene"]
 
             final_people.append(
                 FinalPersonRecord(
                     temporary_id=f"Person #{i}",
-                    description=f"Person entity (Track {trk.track_id})",
+                    description=f"Person entity ({po.object_id})",
                     first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
                     last_seen=f"{int(m_e):02d}:{s_e:04.1f}",
                     activities=activities,
                     movements=movements,
-                    interactions=trk.interactions,
-                    confidence=0.89,
+                    interactions=po.interactions,
+                    confidence=round(po.avg_confidence, 2),
                 )
             )
 

@@ -23,6 +23,19 @@ class Settings:
     DEFAULT_SAMPLE_INTERVAL_SEC: float = float(os.getenv("DEFAULT_SAMPLE_INTERVAL_SEC", "5"))
     MAX_VLM_FRAMES: int = int(os.getenv("MAX_VLM_FRAMES", "100"))
     YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.45"))
+    
+    # VLM Budget Limits by Profile Mode
+    VLM_MAX_FRAMES_FAST: int = int(os.getenv("VLM_MAX_FRAMES_FAST", "8"))
+    VLM_MAX_FRAMES_BALANCED: int = int(os.getenv("VLM_MAX_FRAMES_BALANCED", "16"))
+    VLM_MAX_FRAMES_DEEP: int = int(os.getenv("VLM_MAX_FRAMES_DEEP", "30"))
+
+    # Inference Resolution Optimization (downscale large 4K frames for fast OpenCV/YOLO inference)
+    INFERENCE_MAX_WIDTH: int = int(os.getenv("INFERENCE_MAX_WIDTH", "1280"))
+    INFERENCE_MAX_HEIGHT: int = int(os.getenv("INFERENCE_MAX_HEIGHT", "720"))
+
+    # Performance Profiling Flag
+    DEBUG_PERFORMANCE: bool = os.getenv("VISIONTRACE_DEBUG_PERFORMANCE", "False").lower() in ("true", "1", "yes")
+
     # OpenCV Movement & Visual Change Detection Settings
     MOTION_THRESHOLD: float = float(os.getenv("MOTION_THRESHOLD", "25.0"))
     CHANGE_THRESHOLD: float = float(os.getenv("CHANGE_THRESHOLD", "0.08"))
@@ -46,7 +59,8 @@ class Settings:
     ANALYSIS_VERSION: str = "3.0-accuracy-grounded"
     VLM_PROMPT_VERSION: str = "3.0"
     DEVELOPER_MODE: bool = os.getenv("DEVELOPER_MODE", "True").lower() in ("true", "1", "yes")
-    DISABLE_VIDEO_CACHE: bool = os.getenv("DISABLE_VIDEO_CACHE", "True").lower() in ("true", "1", "yes")
+    DISABLE_VIDEO_CACHE: bool = os.getenv("DISABLE_VIDEO_CACHE", "False").lower() in ("true", "1", "yes")
+    VLM_MAX_WORKERS: int = int(os.getenv("VLM_MAX_WORKERS", "8"))
 
     def ensure_directories(self) -> None:
         """Ensure all required directories exist."""

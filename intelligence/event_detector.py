@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
 from models.schemas import FrameObservation, TrackedObject, VideoEvent, Scene
+from vision.tracker import normalize_class_name
 from utils.logger import logger
 
 class EventDetector:
@@ -233,10 +234,24 @@ class EventDetector:
                 # Do not emit event if VLM evidence is completely missing
                 continue
 
-            # Check tracking association
-            has_tracking = any(
-                p.temporary_id in track_ids for p in group["people"] if p.temporary_id
-            ) or len(tracks) > 0
+            # Check subject-specific tracking association (remove blanket len(tracks) > 0 fallback)
+            has_tracking = False
+            if group.get("people"):
+                for p in group["people"]:
+                    if p.temporary_id and (
+                        p.temporary_id in track_ids
+                        or any((getattr(t, "canonical_name", "") == "person" or t.object_type.lower() == "person") for t in tracks)
+                    ):
+                        has_tracking = True
+                        break
+            if not has_tracking and group.get("objects"):
+                for o in group["objects"]:
+                    if o.name and any(
+                        normalize_class_name(getattr(t, "canonical_name", "") or t.object_type) == normalize_class_name(o.name)
+                        for t in tracks
+                    ):
+                        has_tracking = True
+                        break
 
             # Check state change support
             has_state_change = any(

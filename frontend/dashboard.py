@@ -1,7 +1,9 @@
 import uuid
+import concurrent.futures
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 import streamlit as st
 
 from config.settings import settings
@@ -19,6 +21,7 @@ from models.schemas import VideoMemory, DeveloperMetrics
 from qa.video_qa import video_qa_engine
 from retrieval.semantic_search import semantic_search_engine
 from reports.report_generator import report_generator
+from utils.profiler import profiler
 
 from frontend.components import load_custom_css, render_header, render_metric_card
 from frontend.video_player import render_video_player
@@ -50,6 +53,7 @@ def reset_analysis_state() -> None:
     st.session_state["video_path"] = None
     st.session_state["analysis_id"] = None
     st.session_state["current_upload_name"] = None
+    st.session_state["analysis_running"] = False
 
 
 def init_session_state() -> None:
@@ -66,101 +70,137 @@ def init_session_state() -> None:
         st.session_state["analysis_id"] = None
     if "current_upload_name" not in st.session_state:
         st.session_state["current_upload_name"] = None
+    if "analysis_running" not in st.session_state:
+        st.session_state["analysis_running"] = False
 
 
-def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> VideoMemory:
-    """Execute fresh, un-cached 12-phase processing pipeline."""
+def run_full_pipeline(
+    video_path: Path,
+    sampling_mode: str = "Balanced",
+    yolo_confidence: float = 0.45
+) -> VideoMemory:
+    """Execute optimized 12-stage processing pipeline with profiling."""
+    profiler.start_pipeline()
     analysis_id = str(uuid.uuid4())
     timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     logger.info("========================================")
-    logger.info("NEW VIDEO ANALYSIS")
+    logger.info("NEW OPTIMIZED VIDEO ANALYSIS")
     logger.info("========================================")
     logger.info(f"Analysis ID: {analysis_id}")
     logger.info(f"Upload timestamp: {timestamp_str}")
     logger.info(f"Filename: {video_path.name}")
-    logger.info(f"Analysis version: {settings.ANALYSIS_VERSION}")
-    logger.info("Cache: DISABLED")
-    logger.info("Fresh analysis: YES")
+    logger.info(f"Sampling Mode: {sampling_mode}")
+    logger.info(f"YOLO Confidence Threshold: {yolo_confidence:.2f}")
     logger.info("========================================")
 
     st.session_state["analysis_id"] = analysis_id
 
-    progress_bar = st.progress(0, text=f"Initializing fresh analysis pipeline (ID: {analysis_id[:8]})...")
+    progress_bar = st.progress(0, text=f"Initializing analysis pipeline (ID: {analysis_id[:8]})...")
 
-    # Step 1: Validation & Metadata
+    # Step 1: Validation & Metadata Extraction
+    profiler.start_stage("Validation & Metadata")
     progress_bar.progress(10, text="✓ Step 1/8: Validating video & extracting metadata...")
     validation, metadata, scenes, _ = video_processor.process_video(video_path)
+    profiler.stop_stage("Validation & Metadata", item_count=metadata.frame_count, unit="video frames")
 
-    # Bypass cached memory check if DISABLE_VIDEO_CACHE is True
-    if not getattr(settings, "DISABLE_VIDEO_CACHE", True):
-        cache_key_hash = f"{metadata.video_hash}_{sampling_mode.lower()}"
-        existing_mem = video_memory_manager.load_memory(cache_key_hash)
-        if existing_mem:
-            if video_path.exists():
-                existing_mem.metadata.filepath = str(video_path.resolve())
-            progress_bar.progress(100, text="✓ Loaded cached VideoMemory.")
-            return existing_mem
-
-    # Step 2: Intelligent Multi-Criteria Sampler (Pass 1)
-    progress_bar.progress(25, text=f"● Step 2/8: Extracting motion-adaptive representative frames ({sampling_mode} Mode)...")
+    # Step 2: Intelligent Multi-Criteria Frame Sampler (Stage 1 Fast Scan)
+    profiler.start_stage("Adaptive Frame Sampling")
+    progress_bar.progress(25, text=f"● Step 2/8: Scanning & selecting representative frames ({sampling_mode} Mode)...")
     output_frames_dir = settings.PROCESSED_DIR / metadata.video_hash / "frames"
     sampled_frames = frame_sampler.sample_scene_frames(video_path, scenes, output_frames_dir, sampling_mode=sampling_mode)
+    profiler.stop_stage("Adaptive Frame Sampling", item_count=len(sampled_frames), unit="selected keyframes")
 
-    # Step 3: Temporal Frame Window VLM Analysis (Pass 1)
-    progress_bar.progress(40, text="● Step 3/8: Analyzing frame windows [PREV, CURR, NEXT] with VLM & quality checks...")
+    # Step 3: VLM Frame Window Analysis (Stage 2 Deep Analysis - Concurrently Parallelized)
+    profiler.start_stage("VLM Analysis")
+    progress_bar.progress(40, text=f"● Step 3/8: Analyzing {len(sampled_frames)} frames concurrently with VLM...")
     frame_obs_map = {}
-    for i, sf in enumerate(sampled_frames):
+
+    max_workers = min(settings.VLM_MAX_WORKERS, max(1, len(sampled_frames)))
+
+    def _analyze_window_worker(arg):
+        i, sf = arg
         pf = sampled_frames[i - 1] if i > 0 else None
         nf = sampled_frames[i + 1] if i + 1 < len(sampled_frames) else None
-        obs = frame_analyzer.analyze_frame_window(
+        return sf.frame_id, frame_analyzer.analyze_frame_window(
             sampled_frame=sf,
             prev_frame=pf,
             next_frame=nf,
             video_hash=metadata.video_hash,
         )
-        frame_obs_map[sf.frame_id] = obs
 
-    frame_obs_list = list(frame_obs_map.values())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_analyze_window_worker, (i, sf)) for i, sf in enumerate(sampled_frames)]
+        for future in concurrent.futures.as_completed(futures):
+            f_id, obs = future.result()
+            frame_obs_map[f_id] = obs
 
-    # Step 4: YOLO Object Detection
-    progress_bar.progress(55, text="● Step 4/8: Running YOLO object detection...")
+    frame_obs_list = sorted(list(frame_obs_map.values()), key=lambda o: o.timestamp)
+    profiler.stop_stage("VLM Analysis", item_count=len(sampled_frames), unit="VLM frame queries")
+
+    # Step 4: YOLO Object Detection (Batched & Cached)
+    profiler.start_stage("YOLO Detection")
+    progress_bar.progress(55, text=f"● Step 4/8: Running batched YOLO object detection (conf={yolo_confidence:.2f})...")
+    batch_paths = [sf.path for sf in sampled_frames]
+    path_to_id = {sf.path: sf.frame_id for sf in sampled_frames}
+    batch_dets = object_detector.detect_objects_batch(batch_paths, video_hash=metadata.video_hash, confidence_threshold=yolo_confidence)
+    
     yolo_dets = {}
     for sf in sampled_frames:
-        dets = object_detector.detect_objects(sf.path, video_hash=metadata.video_hash)
-        yolo_dets[sf.frame_id] = dets
+        yolo_dets[sf.frame_id] = batch_dets.get(str(Path(sf.path).resolve()), [])
+    profiler.stop_stage("YOLO Detection", item_count=sum(len(d) for d in yolo_dets.values()), unit="detections")
 
-    # Step 5: Fresh Spatial Bounding Box IoU Entity Tracker Reset
-    progress_bar.progress(65, text="● Step 5/8: Tracking entities with fresh spatial IoU matcher...")
+    # Step 5: Spatial Bounding Box IoU Entity Tracker
+    profiler.start_stage("Entity Tracking")
+    progress_bar.progress(65, text="● Step 5/8: Tracking entity trajectories with Spatial IoU Matcher...")
     fresh_tracker = SpatialIoUTracker()
     tracks = fresh_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
+    profiler.stop_stage("Entity Tracking", item_count=len(tracks), unit="tracked entities")
 
-    # Step 6: Initial Candidate Events & Pass 2 Dense Sampling
-    progress_bar.progress(75, text="● Step 6/8: Identifying candidate events & extracting Pass 2 dense frames...")
+    # Step 6: Candidate Events & Pass 2 Verification
+    profiler.start_stage("Candidate Event Detection")
+    progress_bar.progress(75, text="● Step 6/8: Identifying candidate events & verifying event windows...")
     candidate_events = event_detector.detect_events(scenes, frame_obs_list, tracks)
     event_windows = [(e.start_time, e.end_time) for e in candidate_events if e.event_type != "SCENE"]
 
     if event_windows:
         sampled_frames = frame_sampler.sample_event_dense_frames(video_path, event_windows, output_frames_dir, sampled_frames)
-        # Analyze new dense frames
-        for sf in sampled_frames:
-            if sf.frame_id not in frame_obs_map:
-                obs = frame_analyzer.analyze_frame_window(sf, video_hash=metadata.video_hash)
-                frame_obs_map[sf.frame_id] = obs
-                yolo_dets[sf.frame_id] = object_detector.detect_objects(sf.path, video_hash=metadata.video_hash)
+        # Process newly added verification frames
+        uncached_frames = [sf for sf in sampled_frames if sf.frame_id not in frame_obs_map]
+        if uncached_frames:
+            max_p2_workers = min(settings.VLM_MAX_WORKERS, max(1, len(uncached_frames)))
+            def _analyze_p2_worker(sf):
+                return sf.frame_id, frame_analyzer.analyze_frame_window(sf, video_hash=metadata.video_hash)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_p2_workers) as executor:
+                futures = [executor.submit(_analyze_p2_worker, sf) for sf in uncached_frames]
+                for future in concurrent.futures.as_completed(futures):
+                    f_id, obs = future.result()
+                    frame_obs_map[f_id] = obs
+
+            p2_dets = object_detector.detect_objects_batch([sf.path for sf in uncached_frames], video_hash=metadata.video_hash, confidence_threshold=yolo_confidence)
+            for sf in uncached_frames:
+                yolo_dets[sf.frame_id] = p2_dets.get(str(Path(sf.path).resolve()), [])
 
         frame_obs_list = sorted(list(frame_obs_map.values()), key=lambda o: o.timestamp)
+    profiler.stop_stage("Candidate Event Detection", item_count=len(candidate_events), unit="candidate events")
 
-    # Step 7: Event Verification Pipeline & Confidence Calculation
+    # Step 7: Multi-Source Event Verification Pipeline
+    profiler.start_stage("Event Verification")
     progress_bar.progress(85, text="● Step 7/8: Running multi-source event verification & confidence scoring...")
     tracks = fresh_tracker.track_entities(sampled_frames, yolo_dets, frame_obs_list)
     verified_events = event_detector.detect_events(scenes, frame_obs_list, tracks)
+    profiler.stop_stage("Event Verification", item_count=len(verified_events), unit="verified events")
 
-    # Step 8: Temporal Reasoning & Memory Telemetry
-    progress_bar.progress(95, text="● Step 8/8: Synthesizing timeline, final summary & structured memory...")
+    # Step 8: Temporal Reasoning & Final Summary Generation
+    profiler.start_stage("Temporal Reasoning")
+    progress_bar.progress(95, text="● Step 8/8: Synthesizing grounded timeline & physical object summary...")
     timeline = temporal_reasoner.synthesize_timeline(scenes, verified_events, tracks, frame_obs_list)
     summaries = temporal_reasoner.generate_summaries(metadata, scenes, timeline, tracks)
     final_summary = temporal_reasoner.generate_final_summary(metadata, scenes, timeline, tracks, frame_obs_list, sampled_frames)
+    profiler.stop_stage("Temporal Reasoning", item_count=len(timeline), unit="timeline items")
+
+    total_proc_time = profiler.stop_pipeline()
 
     analyzed_cnt = len([o for o in frame_obs_list if o.is_analyzed])
     skipped_cnt = len([o for o in frame_obs_list if not o.is_analyzed])
@@ -177,6 +217,7 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
         vlm_calls=analyzed_cnt,
         vlm_retries=0,
         vlm_failures=skipped_cnt,
+        yolo_confidence_threshold=round(yolo_confidence, 2),
         yolo_detections_count=sum(len(d) for d in yolo_dets.values()),
         tracked_entities_count=len(tracks),
         candidate_events_count=len(candidate_events),
@@ -202,7 +243,7 @@ def run_full_pipeline(video_path: Path, sampling_mode: str = "Balanced") -> Vide
     )
 
     video_memory_manager.save_memory(memory)
-    progress_bar.progress(100, text=f"✅ Fresh Pipeline Complete (Analysis ID: {analysis_id[:8]})!")
+    progress_bar.progress(100, text=f"✅ Fresh Pipeline Complete in {total_proc_time:.1f}s (ID: {analysis_id[:8]})!")
     return memory
 
 
@@ -216,20 +257,29 @@ def render_dashboard() -> None:
     with st.sidebar:
         st.title("⚙️ Platform Config")
         sampling_mode = st.radio(
-            "🎯 Sampling Profile Profile:",
+            "🎯 Sampling Profile:",
             ["Balanced", "Fast", "Deep Analysis"],
             index=0,
-            help="Balanced: Optimal accuracy/speed. Fast: Quick overview. Deep Analysis: Dense sampling for complex videos."
+            help="Balanced: Optimal accuracy/speed. Fast: Quick overview (max 8 VLM frames). Deep Analysis: Dense sampling."
         )
         st.session_state["sampling_mode"] = sampling_mode
+
+        yolo_confidence = st.slider(
+            "🎯 YOLO Confidence Threshold:",
+            min_value=0.05,
+            max_value=0.95,
+            value=st.session_state.get("yolo_confidence", float(getattr(settings, "YOLO_CONFIDENCE", 0.45))),
+            step=0.05,
+            help="Confidence threshold for YOLO object detection. Lower = more candidate detections, Higher = strictly high-confidence detections."
+        )
+        st.session_state["yolo_confidence"] = yolo_confidence
 
         st.divider()
         st.markdown(f"**VLM Provider:** `{settings.VLM_PROVIDER.upper()}`")
         st.markdown(f"**VLM Model:** `{settings.VLM_MODEL}`")
         st.markdown(f"**Mock Mode:** `{settings.VLM_MOCK_MODE}`")
-        st.markdown(f"**YOLO Threshold:** `{settings.YOLO_CONFIDENCE}`")
+        st.markdown(f"**YOLO Threshold:** `{yolo_confidence:.2f}` (Runtime)")
         st.markdown(f"**Analysis Ver:** `{settings.ANALYSIS_VERSION}`")
-        st.markdown(f"**Cache Disabled:** `{settings.DISABLE_VIDEO_CACHE}`")
 
         st.divider()
         st.markdown("### 🚫 Scope Restriction")
@@ -245,24 +295,36 @@ def render_dashboard() -> None:
     )
 
     if uploaded_file is not None:
-        # Detect new upload and clear stale state
-        if st.session_state.get("current_upload_name") != uploaded_file.name:
-            reset_analysis_state()
-            st.session_state["current_upload_name"] = uploaded_file.name
-
         save_path = settings.UPLOADS_DIR / uploaded_file.name
-        with open(save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        is_new_upload = st.session_state.get("current_upload_name") != uploaded_file.name
+
+        if is_new_upload or not save_path.exists() or save_path.stat().st_size != uploaded_file.size:
+            if is_new_upload:
+                reset_analysis_state()
+                st.session_state["current_upload_name"] = uploaded_file.name
+
+            # Stream save in 8MB chunks to prevent RAM spikes and disk write delays
+            with open(save_path, "wb") as f:
+                uploaded_file.seek(0)
+                chunk_size = 8 * 1024 * 1024
+                while True:
+                    chunk = uploaded_file.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
 
         st.session_state["video_path"] = save_path
 
-        if st.button("🚀 Process Video with Fresh High-Accuracy Pipeline", type="primary"):
-            # Clear previous result before starting fresh pipeline run
+        if st.button("🚀 Process Video with Fresh High-Accuracy Pipeline", type="primary", disabled=st.session_state.get("analysis_running", False)):
+            st.session_state["analysis_running"] = True
             st.session_state["memory"] = None
             st.session_state["metadata"] = None
-            memory = run_full_pipeline(save_path, sampling_mode=sampling_mode)
-            st.session_state["memory"] = memory
-            st.session_state["metadata"] = memory.metadata
+            try:
+                memory = run_full_pipeline(save_path, sampling_mode=sampling_mode, yolo_confidence=yolo_confidence)
+                st.session_state["memory"] = memory
+                st.session_state["metadata"] = memory.metadata
+            finally:
+                st.session_state["analysis_running"] = False
 
     # Render ingested video player & tabs if video exists
     if st.session_state["metadata"] is not None:
@@ -398,3 +460,8 @@ def render_dashboard() -> None:
             # Tab 11: Developer Dashboard
             with tabs[11]:
                 render_developer_accuracy_dashboard(memory)
+                st.divider()
+                st.markdown("### ⏱️ Performance Profiler Timing Breakdown")
+                summary = profiler.get_summary()
+                st.markdown(f"**Total Pipeline Execution Duration:** `{summary.get('total_duration_sec', 0.0):.2f} sec`")
+                st.json(summary.get("stages", {}))

@@ -6,14 +6,16 @@ import numpy as np
 from config.settings import settings
 from models.schemas import Scene, SampledFrame
 from video.movement_detector import movement_detector
+from video.frame_provider import video_frame_provider
 from vision.quality import frame_quality_checker
 from utils.logger import logger
 
 class AdaptiveFrameSampler:
     """
     OpenCV Change-Driven Movement & Visual Keyframe Sampler.
-    Executes frame-by-frame movement analysis, creates movement event windows (start, peak, end),
-    applies perceptual similarity filtering to remove redundant frames, and outputs representative keyframes for VLM ingestion.
+    Executes frame-by-frame movement analysis using centralized VideoFrameProvider,
+    creates movement event windows (start, peak, end), applies perceptual similarity filtering,
+    and enforces VLM frame budget limits.
     """
 
     def is_visually_similar(self, frame_a: np.ndarray, frame_b: np.ndarray) -> bool:
@@ -57,6 +59,8 @@ class AdaptiveFrameSampler:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        video_frame_provider.set_video(path)
+
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened():
             logger.error(f"Could not open video for sampling: {path.name}")
@@ -66,55 +70,48 @@ class AdaptiveFrameSampler:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         cap.release()
 
-        # Step dynamically based on mode (evaluate candidate motion every N frames)
+        # Step dynamically based on profile mode
         mode = sampling_mode.lower()
         if mode == "fast":
             frame_step = max(1, int(fps * 0.5))  # Every ~0.5s
             min_gap_sec = 0.6
+            vlm_budget = settings.VLM_MAX_FRAMES_FAST
         elif mode == "deep analysis":
             frame_step = max(1, int(fps * 0.2))  # Every ~0.2s
             min_gap_sec = 0.25
+            vlm_budget = settings.VLM_MAX_FRAMES_DEEP
         else:  # Balanced
             frame_step = max(1, int(fps * 0.3))  # Every ~0.3s
             min_gap_sec = 0.40
+            vlm_budget = settings.VLM_MAX_FRAMES_BALANCED
 
-        # Step 1: Scan video to evaluate motion scores and detect movement candidate frames
-        cap = cv2.VideoCapture(str(path))
+        # Step 1: Scan video using VideoFrameProvider
         candidate_frames_meta: List[Dict[str, Any]] = []
         prev_gray_blur = None
 
-        frame_idx = 0
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
+        for frame_idx, frame in video_frame_provider.iterate_frames(step=frame_step):
+            # Downscale large frames for fast OpenCV motion evaluation
+            small_frame = video_frame_provider.resize_for_inference(frame, settings.INFERENCE_MAX_WIDTH, settings.INFERENCE_MAX_HEIGHT)
+            motion_res = movement_detector.analyze_frame_motion(
+                curr_frame=small_frame,
+                prev_gray_blur=prev_gray_blur
+            )
+            prev_gray_blur = motion_res.get("curr_gray_blur")
 
-            if frame_idx % frame_step == 0 or frame_idx == 0 or frame_idx == total_frames - 1:
-                motion_res = movement_detector.analyze_frame_motion(
-                    curr_frame=frame,
-                    prev_gray_blur=prev_gray_blur
-                )
-                prev_gray_blur = motion_res.get("curr_gray_blur")
-
-                ts = round(frame_idx / fps, 2)
-                candidate_frames_meta.append({
-                    "frame_index": frame_idx,
-                    "timestamp": ts,
-                    "motion_score": motion_res["motion_score"],
-                    "change_score": motion_res["change_score"],
-                    "motion_area_ratio": motion_res["motion_area_ratio"],
-                    "is_meaningful_change": motion_res["is_meaningful_change"],
-                    "is_camera_motion": motion_res["is_camera_motion"],
-                    "motion_type": motion_res["motion_type"],
-                })
-
-            frame_idx += 1
-        cap.release()
+            ts = round(frame_idx / fps, 2)
+            candidate_frames_meta.append({
+                "frame_index": frame_idx,
+                "timestamp": ts,
+                "motion_score": motion_res["motion_score"],
+                "change_score": motion_res["change_score"],
+                "motion_area_ratio": motion_res["motion_area_ratio"],
+                "is_meaningful_change": motion_res["is_meaningful_change"],
+                "is_camera_motion": motion_res["is_camera_motion"],
+                "motion_type": motion_res["motion_type"],
+            })
 
         # Step 2: Form Movement Event Windows and Select Keyframes
-        # Group contiguous movement candidates into movement windows
         meaningful_candidates = [meta for meta in candidate_frames_meta if meta["is_meaningful_change"]]
-        
         selected_meta_indices: List[Tuple[Dict[str, Any], str]] = []  # (meta, selection_reason)
 
         if not meaningful_candidates:
@@ -122,7 +119,6 @@ class AdaptiveFrameSampler:
             if candidate_frames_meta:
                 selected_meta_indices.append((candidate_frames_meta[0], "scene_initial_static"))
         else:
-            # Build movement windows
             windows: List[List[Dict[str, Any]]] = []
             curr_window: List[Dict[str, Any]] = []
 
@@ -137,7 +133,6 @@ class AdaptiveFrameSampler:
             if curr_window:
                 windows.append(curr_window)
 
-            # For each window, select START, PEAK, END keyframes
             for win in windows:
                 if not win:
                     continue
@@ -153,18 +148,19 @@ class AdaptiveFrameSampler:
                 if end_meta["frame_index"] != start_meta["frame_index"]:
                     selected_meta_indices.append((end_meta, "movement_end"))
 
-        # Add scene boundary anchors if missing
+        # Add scene boundary anchors
         scene_start_frames = {s.start_frame for s in scenes}
         for meta in candidate_frames_meta:
             if meta["frame_index"] in scene_start_frames:
                 if not any(sm[0]["frame_index"] == meta["frame_index"] for sm in selected_meta_indices):
                     selected_meta_indices.append((meta, "scene_boundary_anchor"))
 
-        # Sort selected frames chronologically
         selected_meta_indices.sort(key=lambda item: item[0]["timestamp"])
 
-        # Step 3: Perceptual Similarity Filter & Frame Extraction
-        cap = cv2.VideoCapture(str(path))
+        # Step 3: Extract Selected Keyframes using VideoFrameProvider Batch Lookup
+        indices_to_fetch = [meta["frame_index"] for meta, _ in selected_meta_indices]
+        fetched_frames = video_frame_provider.get_frames_batch(indices_to_fetch)
+
         sampled_frames: List[SampledFrame] = []
         last_kept_frame = None
         last_kept_ts = -10.0
@@ -174,24 +170,23 @@ class AdaptiveFrameSampler:
             f_idx = meta["frame_index"]
             ts = meta["timestamp"]
 
-            # Check min frame gap
             if (ts - last_kept_ts) < min_gap_sec and reason not in ("scene_boundary_anchor", "movement_start"):
                 continue
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret or frame is None:
+            frame = fetched_frames.get(f_idx)
+            if frame is None:
                 continue
 
-            # Perceptual similarity check against last kept frame
+            # Perceptual similarity check
             if last_kept_frame is not None and reason not in ("scene_boundary_anchor", "movement_start"):
                 if self.is_visually_similar(last_kept_frame, frame):
                     continue
 
-            # Save selected change frame to disk
+            # Save frame to disk if not already present
             frame_filename = f"change_frame_{f_idx:06d}.jpg"
             save_path = out_dir / frame_filename
-            cv2.imwrite(str(save_path), frame)
+            if not save_path.exists() or save_path.stat().st_size == 0:
+                cv2.imwrite(str(save_path), frame)
 
             last_kept_frame = frame.copy()
             last_kept_ts = ts
@@ -216,14 +211,12 @@ class AdaptiveFrameSampler:
             sampled_frames.append(sf)
             global_frame_counter += 1
 
-            if len(sampled_frames) >= settings.MAX_VLM_FRAMES:
-                logger.warning(f"Reached max VLM frame limit ({settings.MAX_VLM_FRAMES} frames).")
+            if len(sampled_frames) >= vlm_budget:
+                logger.info(f"[Frame Sampler] Reached VLM budget limit ({vlm_budget} frames) for profile '{sampling_mode}'.")
                 break
 
-        cap.release()
-
         sampled_frames.sort(key=lambda f: f.timestamp)
-        logger.info(f"OpenCV Change Sampler selected {len(sampled_frames)} representative movement keyframes out of {total_frames} total video frames.")
+        logger.info(f"OpenCV Adaptive Sampler selected {len(sampled_frames)} representative keyframes out of {total_frames} total frames (Profile: {sampling_mode}).")
         return sampled_frames
 
     def sample_event_dense_frames(
@@ -244,11 +237,14 @@ class AdaptiveFrameSampler:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        video_frame_provider.set_video(path)
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened():
             return existing_frames
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+
         existing_timestamps = {f.timestamp for f in existing_frames}
         dense_frames = list(existing_frames)
         global_counter = len(existing_frames) + 1
@@ -264,14 +260,14 @@ class AdaptiveFrameSampler:
                     continue
 
                 frame_idx = int(st_round * fps)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if not ret or frame is None:
+                frame = video_frame_provider.get_frame(frame_idx)
+                if frame is None:
                     continue
 
                 frame_filename = f"pass2_dense_frame_{frame_idx:06d}.jpg"
                 save_path = out_dir / frame_filename
-                cv2.imwrite(str(save_path), frame)
+                if not save_path.exists() or save_path.stat().st_size == 0:
+                    cv2.imwrite(str(save_path), frame)
 
                 dense_sf = SampledFrame(
                     frame_id=f"frame_p2_{global_counter:04d}",
@@ -289,7 +285,6 @@ class AdaptiveFrameSampler:
                 if len(dense_frames) >= settings.MAX_VLM_FRAMES + 30:
                     break
 
-        cap.release()
         dense_frames.sort(key=lambda f: f.timestamp)
         logger.info(f"Pass 2 Event-Focused Dense Sampler extracted {len(dense_frames) - len(existing_frames)} additional verification frames.")
         return dense_frames
