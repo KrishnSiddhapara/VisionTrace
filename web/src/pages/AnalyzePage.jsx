@@ -145,14 +145,30 @@ export default function AnalyzePage({ activeMemory, setActiveMemory, seekTime, o
   return (
     <div className="p-6 space-y-8 max-w-7xl mx-auto">
       {/* Page Header */}
-      <div className="space-y-1">
-        <h1 className="text-2xl font-extrabold text-white tracking-tight flex items-center gap-2">
-          <Sparkles className="w-6 h-6 text-indigo-400" />
-          Video Ingestion & AI Intelligence Engine
-        </h1>
-        <p className="text-xs text-slate-400">
-          Upload video streams to run YOLOv8 object detection, Spatial IoU entity tracking, and VLM temporal reasoning.
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-extrabold text-white tracking-tight flex items-center gap-2">
+            <Sparkles className="w-6 h-6 text-indigo-400" />
+            Video Ingestion & AI Intelligence Engine
+          </h1>
+          <p className="text-xs text-slate-400">
+            Upload video streams to run YOLOv8 object detection, Spatial IoU entity tracking, and VLM temporal reasoning.
+          </p>
+        </div>
+
+        {activeMemory && !analyzing && (
+          <button
+            onClick={() => {
+              setActiveMemory(null);
+              setSelectedFile(null);
+              setUploadedData(null);
+            }}
+            className="flex items-center gap-2 px-4 py-2 rounded-2xl text-xs font-bold text-white bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 shadow-lg shadow-indigo-600/30 transition-all duration-200 active:scale-95 shrink-0"
+          >
+            <Upload className="w-4 h-4" />
+            <span>+ Upload New Video</span>
+          </button>
+        )}
       </div>
 
       {/* Analysis Running State */}
@@ -464,6 +480,13 @@ export default function AnalyzePage({ activeMemory, setActiveMemory, seekTime, o
                       const lastSeen = person.last_seen_str || (typeof person.last_seen === 'number' ? formatTimestamp(person.last_seen) : person.last_seen);
                       const acts = person.activities || [];
                       const mvts = person.movements || (person.motion_state ? [person.motion_state] : []);
+                      const shortNote = person.description || (
+                        acts.length > 0 ? acts[0] : (
+                          mvts.length > 0 ? mvts[0] : (
+                            person.motion_state === 'MOVING' ? 'Moving in visible area' : 'Stationary in scene'
+                          )
+                        )
+                      );
 
                       return (
                         <div key={idx} className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-3">
@@ -493,24 +516,12 @@ export default function AnalyzePage({ activeMemory, setActiveMemory, seekTime, o
                             </div>
                           </div>
 
-                          {acts.length > 0 && (
-                            <div className="space-y-1">
-                              <span className="text-[10px] font-semibold text-slate-400 uppercase block">Activities:</span>
-                              <div className="flex flex-wrap gap-1">
-                                {acts.map((a, aIdx) => (
-                                  <span key={aIdx} className="text-xs px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                                    {a}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {mvts.length > 0 && (
-                            <div className="text-xs text-slate-400 font-mono pt-1 border-t border-slate-800/80">
-                              Movement: <span className="text-slate-300">{mvts.join(', ')}</span>
-                            </div>
-                          )}
+                          <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/15 space-y-1">
+                            <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider block">Shortnote Description:</span>
+                            <p className="text-xs text-slate-200 font-mono leading-relaxed">
+                              {shortNote}
+                            </p>
+                          </div>
                         </div>
                       );
                     })}

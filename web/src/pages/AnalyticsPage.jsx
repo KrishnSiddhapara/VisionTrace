@@ -255,6 +255,13 @@ export default function AnalyticsPage({ activeMemory }) {
                 const acts = person.activities || [];
                 const mvts = person.movements || (person.motion_state ? [person.motion_state] : []);
                 const trackIds = person.track_ids?.length ? person.track_ids.join(', #') : (person.track_id ? `#${person.track_id}` : '');
+                const shortNote = person.description || (
+                  acts.length > 0 ? acts[0] : (
+                    mvts.length > 0 ? mvts[0] : (
+                      person.motion_state === 'MOVING' ? 'Moving in visible area' : 'Stationary in scene'
+                    )
+                  )
+                );
 
                 return (
                   <div key={idx} className="glass-panel p-5 rounded-2xl border border-slate-800 space-y-4">
@@ -289,24 +296,12 @@ export default function AnalyticsPage({ activeMemory }) {
                       </div>
                     </div>
 
-                    {acts.length > 0 && (
-                      <div className="space-y-1">
-                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">Observed Activities:</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {acts.map((act, aIdx) => (
-                            <span key={aIdx} className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                              {act}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {mvts.length > 0 && (
-                      <div className="text-xs text-slate-400 font-mono pt-2 border-t border-slate-800/80">
-                        Motion State: <strong className="text-slate-200">{mvts.join(', ')}</strong>
-                      </div>
-                    )}
+                    <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/15 space-y-1">
+                      <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider block">Shortnote Description:</span>
+                      <p className="text-xs text-slate-200 font-mono leading-relaxed">
+                        {shortNote}
+                      </p>
+                    </div>
                   </div>
                 );
               })}

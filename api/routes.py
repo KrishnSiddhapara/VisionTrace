@@ -25,8 +25,8 @@ router = APIRouter()
 def _sanitize_memory_dict(memory_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure relative URL paths for media frames in VideoMemory dict and attach reconciled canonical entities."""
     v_hash = memory_dict.get("metadata", {}).get("video_hash") or memory_dict.get("video_hash", "")
-    # Sanitize video_hash if it has trailing analysis id
-    if "_" in v_hash and len(v_hash.split("_")[0]) == 32:
+    # Sanitize video_hash if it has trailing analysis id (SHA256 hex is 64 chars)
+    if "_" in v_hash and len(v_hash.split("_")[0]) in (32, 64):
         v_hash = v_hash.split("_")[0]
 
     sampled_frames = memory_dict.get("sampled_frames", [])
@@ -210,45 +210,65 @@ async def stream_video_analysis(
 
 @router.get("/videos/")
 async def list_videos():
-    """List all analyzed video memories stored in PROCESSED_DIR."""
+    """List all analyzed video memories stored in PROCESSED_DIR cleanly without duplicates."""
     memories = []
-    for mem_file in settings.PROCESSED_DIR.glob("memory_*.json"):
+    seen_hashes = set()
+
+    memory_files = sorted(
+        settings.PROCESSED_DIR.glob("memory_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    for mem_file in memory_files:
         try:
             with open(mem_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            metadata = data.get("metadata", {})
-            tracks = [TrackedObject(**t) for t in data.get("tracks", [])]
-            frame_obs = [FrameObservation(**o) for o in data.get("frame_observations", [])]
-            meta_obj = VideoMetadata(**metadata) if metadata else None
             
-            # Reconcile unique canonical people
-            canonical_people = canonical_person_registry.reconcile_person_tracks(tracks, frame_obs, meta_obj)
-            final_people = data.get("final_summary", {}).get("people", []) if data.get("final_summary") else []
-            people_cnt = len(final_people) if final_people else len(canonical_people)
+            raw_hash = data.get("video_hash") or data.get("metadata", {}).get("video_hash") or ""
+            canonical_hash = raw_hash.split("_")[0] if ("_" in raw_hash and len(raw_hash.split("_")[0]) in (32, 64)) else raw_hash
 
-            # Reconcile unique physical objects
-            phys_objects = physical_object_registry.reconcile_tracks(tracks, frame_obs)
-            final_objects = data.get("final_summary", {}).get("objects", []) if data.get("final_summary") else []
-            non_person_phys = [po for po in phys_objects if po.canonical_name != "person"]
-            objects_cnt = len(final_objects) if final_objects else len(non_person_phys)
+            if not canonical_hash or canonical_hash in seen_hashes:
+                continue
+            seen_hashes.add(canonical_hash)
+
+            metadata = data.get("metadata", {})
+
+            people_cnt = (
+                len(data.get("canonical_people", []))
+                or len(data.get("person_entities", []))
+                or len(data.get("final_summary", {}).get("people", []))
+                or len([t for t in data.get("tracks", []) if t.get("object_type", "").lower() == "person"])
+            )
+
+            objects_cnt = (
+                len(data.get("physical_objects", []))
+                or len(data.get("final_summary", {}).get("objects", []))
+                or len([t for t in data.get("tracks", []) if t.get("object_type", "").lower() != "person"])
+            )
+
+            summary_overview = (
+                data.get("summary", {}).get("quick")
+                or data.get("final_summary", {}).get("final_description")
+                or data.get("summary", {}).get("standard")
+                or "Video analysis memory available."
+            )
 
             memories.append({
-                "video_hash": data.get("video_hash"),
-                "filename": metadata.get("filename", "Unknown"),
+                "video_hash": canonical_hash,
+                "filename": metadata.get("filename", "Unknown Video"),
                 "duration_sec": metadata.get("duration_sec", 0.0),
                 "fps": metadata.get("fps", 0),
                 "resolution_str": metadata.get("resolution_str", ""),
                 "people_count": people_cnt,
                 "objects_count": objects_cnt,
                 "events_count": len(data.get("events", [])),
-                "summary_overview": data.get("summary", {}).get("quick", ""),
+                "summary_overview": summary_overview,
                 "file_size_mb": metadata.get("file_size_mb", 0.0)
             })
         except Exception as e:
             logger.warning(f"Error reading memory file {mem_file}: {e}")
 
-    # Sort descending by filename
-    memories.sort(key=lambda m: m.get("filename", ""), reverse=True)
     return {"videos": memories}
 
 
@@ -335,9 +355,10 @@ async def delete_single_video_history(video_hash: str):
 @router.get("/videos/{video_hash}")
 async def get_video_memory(video_hash: str):
     """Retrieve full VideoMemory schema by video_hash."""
-    mem_path = settings.PROCESSED_DIR / f"memory_{video_hash}.json"
+    canonical_hash = video_hash.split("_")[0] if ("_" in video_hash and len(video_hash.split("_")[0]) in (32, 64)) else video_hash
+    mem_path = settings.PROCESSED_DIR / f"memory_{canonical_hash}.json"
     if not mem_path.exists():
-        candidates = list(settings.PROCESSED_DIR.glob(f"memory_{video_hash}*.json"))
+        candidates = list(settings.PROCESSED_DIR.glob(f"memory_{canonical_hash}*.json"))
         if candidates:
             mem_path = candidates[0]
 

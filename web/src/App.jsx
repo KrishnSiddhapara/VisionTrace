@@ -64,13 +64,19 @@ export default function App() {
         <Header
           activeTab={activeTab}
           activeMemory={activeMemory}
-          onNewAnalysisClick={() => setActiveTab('analyze')}
+          onNewAnalysisClick={() => {
+            setActiveMemory(null);
+            setActiveTab('analyze');
+          }}
         />
 
         <main className="flex-1 overflow-y-auto bg-slate-950">
           {activeTab === 'dashboard' && (
             <DashboardPage
-              onAnalyzeClick={() => setActiveTab('analyze')}
+              onAnalyzeClick={() => {
+                setActiveMemory(null);
+                setActiveTab('analyze');
+              }}
               onSelectVideo={handleSelectVideoHash}
             />
           )}

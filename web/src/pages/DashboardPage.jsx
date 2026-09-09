@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Video, Users, Box, Zap, Sparkles, Play, Shield, Layers, Brain, ArrowRight } from 'lucide-react';
+import { Video, Users, Box, Zap, Sparkles, Play, Shield, Layers, Brain, ArrowRight, Trash2 } from 'lucide-react';
 import StatCard from '../components/StatCard';
-import { fetchDashboardStats, fetchVideosList } from '../api';
+import { fetchDashboardStats, fetchVideosList, deleteSingleVideo, clearAllVideos } from '../api';
 
 export default function DashboardPage({ onAnalyzeClick, onSelectVideo }) {
   const [stats, setStats] = useState({
@@ -13,23 +13,36 @@ export default function DashboardPage({ onAnalyzeClick, onSelectVideo }) {
   const [recentVideos, setRecentVideos] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  const reloadData = async () => {
+    try {
+      const [statsData, videosData] = await Promise.all([
+        fetchDashboardStats(),
+        fetchVideosList()
+      ]);
+      if (statsData) setStats(statsData);
+      if (videosData?.videos) setRecentVideos(videosData.videos);
+    } catch (err) {
+      console.error('Failed to load dashboard data:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    async function loadData() {
+    reloadData();
+  }, []);
+
+  const handleDeleteVideo = async (e, hash) => {
+    e.stopPropagation();
+    if (window.confirm('Delete this analyzed video memory?')) {
       try {
-        const [statsData, videosData] = await Promise.all([
-          fetchDashboardStats(),
-          fetchVideosList()
-        ]);
-        if (statsData) setStats(statsData);
-        if (videosData?.videos) setRecentVideos(videosData.videos);
+        await deleteSingleVideo(hash);
+        await reloadData();
       } catch (err) {
-        console.error('Failed to load dashboard data:', err);
-      } finally {
-        setLoading(false);
+        alert(`Failed to delete video: ${err.message}`);
       }
     }
-    loadData();
-  }, []);
+  };
 
   return (
     <div className="p-6 space-y-8 max-w-7xl mx-auto">
@@ -124,6 +137,13 @@ export default function DashboardPage({ onAnalyzeClick, onSelectVideo }) {
                       </p>
                     </div>
                   </div>
+                  <button
+                    onClick={(e) => handleDeleteVideo(e, vid.video_hash)}
+                    title="Delete video memory"
+                    className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors shrink-0"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
 
                 <p className="text-xs text-slate-300 line-clamp-2 italic bg-slate-900/60 p-2.5 rounded-xl border border-slate-800/80">

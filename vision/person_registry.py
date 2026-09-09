@@ -26,6 +26,22 @@ class PersonEntity(BaseModel):
     evidence_level: str = "CONFIRMED"  # 'CONFIRMED', 'PROBABLE', 'UNCERTAIN'
     is_active: bool = True
 
+    def get_shortnote_description(self) -> str:
+        """Generates a succinct short note description without technical noise or long detailed breakdowns."""
+        clean_acts = [a for a in self.activities if a.lower() not in ("present in scene", "present in visual scene")]
+
+        if clean_acts:
+            return clean_acts[0].strip().capitalize()
+
+        if self.lifecycle_events:
+            return self.lifecycle_events[0].strip().capitalize()
+
+        if self.motion_state == "MOVING":
+            return "Moving in visible area"
+
+        return "Stationary in scene"
+
+
 
 import re
 
@@ -108,14 +124,9 @@ class CanonicalPersonRegistry:
 
         det_max_concurrent = max((len(boxes) for boxes in time_to_boxes.values()), default=1)
 
-        vlm_max_people = 0
-        if frame_observations:
-            vlm_counts = [len(obs.people) for obs in frame_observations if obs.people]
-            if vlm_counts:
-                vlm_max_people = max(vlm_counts)
-
-        max_concurrent_people = max(det_max_concurrent, vlm_max_people)
-        logger.info(f"[Person Registry] Peak concurrent people in any single frame: {max_concurrent_people} (det={det_max_concurrent}, vlm={vlm_max_people})")
+        # Primary peak concurrency is determined by verified visual detection co-existence
+        max_concurrent_people = det_max_concurrent
+        logger.info(f"[Person Registry] Peak concurrent people in any single frame: {max_concurrent_people} (det={det_max_concurrent})")
 
         # 2. First Pass: Sort tracks chronologically and perform Hungarian spatial-temporal matching
         sorted_tracks = sorted(filtered_tracks, key=lambda t: (t.first_seen, t.track_id))
@@ -314,54 +325,36 @@ class CanonicalPersonRegistry:
             if (total_duration - entity.last_seen) > 1.5 and self._is_near_boundary(last_bbox, width, height):
                 entity.lifecycle_events.append("exited visible area")
 
-        # 6. Reconcile VLM Person Observations & text mentions (Synthesize missing person entities)
+        # 6. Attach VLM semantic observations to existing PersonEntities (Without creating fake visual entities)
         if frame_observations:
             for obs in frame_observations:
-                all_text = (obs.activities or []) + (obs.observations or []) + (obs.uncertainties or [])
-                text_count = extract_people_count_from_text(all_text)
-                target_count = max(len(obs.people) if obs.people else 0, text_count)
+                if not obs.people:
+                    continue
 
-                if target_count > 0:
-                    active_entities = [
-                        e for e in person_entities
-                        if e.first_seen <= (obs.timestamp + 2.5) and e.last_seen >= (obs.timestamp - 2.5)
-                    ]
+                active_entities = [
+                    e for e in person_entities
+                    if e.first_seen <= (obs.timestamp + 3.0) and e.last_seen >= (obs.timestamp - 3.0)
+                ]
 
-                    assigned_in_frame = set()
-                    people_list = list(obs.people) if obs.people else []
+                # Match VLM descriptions to existing physical person entities if present
+                for idx, v_person in enumerate(obs.people):
+                    if idx < len(active_entities):
+                        target_entity = active_entities[idx]
+                        if v_person.activity and v_person.activity not in target_entity.activities:
+                            target_entity.activities.append(v_person.activity)
 
-                    # If text explicitly mentions more people than people_list, fill synthetic observations
-                    if target_count > len(people_list):
-                        for k in range(len(people_list) + 1, target_count + 1):
-                            people_list.append(
-                                PersonObservation(
-                                    temporary_id=f"Person #{k}",
-                                    description="Child / person detected in scene",
-                                    activity="Present in visual scene",
-                                    confidence=0.88,
-                                )
-                            )
-
-                    for v_person in people_list:
-                        unassigned = [e for e in active_entities if e.person_id not in assigned_in_frame]
-                        if unassigned:
-                            target_entity = unassigned[0]
-                            assigned_in_frame.add(target_entity.person_id)
-                            target_entity.last_seen = max(target_entity.last_seen, obs.timestamp)
-                            target_entity.first_seen = min(target_entity.first_seen, obs.timestamp)
-                            if v_person.activity and v_person.activity not in target_entity.activities:
-                                target_entity.activities.append(v_person.activity)
-                        else:
-                            # Spawn new canonical PersonEntity for unassigned person in frame
-                            new_idx = len(person_entities) + 1
-                            p_id = f"Person #{new_idx}"
-                            act_list = [v_person.activity] if v_person.activity else ["Present in visual scene"]
-                            new_pe = PersonEntity(
+                # Fallback recovery ONLY if zero visual tracks exist at all
+                if not person_entities and obs.people:
+                    for k, v_person in enumerate(obs.people, start=1):
+                        p_id = f"Person #{k}"
+                        act_list = [v_person.activity] if v_person.activity else ["Present in visual scene"]
+                        person_entities.append(
+                            PersonEntity(
                                 person_id=p_id,
                                 canonical_name="person",
                                 first_seen=obs.timestamp,
                                 last_seen=obs.timestamp,
-                                track_ids=[f"vlm_person_{new_idx}"],
+                                track_ids=[f"vlm_person_{k}"],
                                 positions=[{"timestamp": obs.timestamp, "bbox": [100.0, 100.0, 200.0, 300.0]}],
                                 activities=act_list,
                                 interactions=[],
@@ -371,9 +364,7 @@ class CanonicalPersonRegistry:
                                 evidence_level="CONFIRMED",
                                 is_active=True,
                             )
-                            person_entities.append(new_pe)
-                            active_entities.append(new_pe)
-                            assigned_in_frame.add(p_id)
+                        )
 
         # 7. Final clean renumbering of Person IDs: Person #1, Person #2, Person #3...
         for idx, pe in enumerate(person_entities, start=1):

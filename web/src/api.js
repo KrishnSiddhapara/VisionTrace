@@ -84,3 +84,14 @@ export const createAnalysisStream = (videoHash, samplingMode = 'Balanced', yoloC
     eventSource.close();
   };
 };
+
+export const clearAllVideos = async () => {
+  const response = await axios.delete(`${API_BASE}/videos/`);
+  return response.data;
+};
+
+export const deleteSingleVideo = async (videoHash) => {
+  const response = await axios.delete(`${API_BASE}/videos/${videoHash}`);
+  return response.data;
+};
+

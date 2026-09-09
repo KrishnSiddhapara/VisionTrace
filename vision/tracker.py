@@ -188,20 +188,20 @@ def calculate_center_distance(box1: List[float], box2: List[float]) -> float:
 class SpatialIoUTracker:
     """
     Advanced Multi-Object Tracker with 1-to-1 Hungarian Data Association (`linear_sum_assignment`),
-    Constant-Velocity Linear Motion Prediction, BBox IoU & Scale Consistency, and
-    Explicit Track Lifecycle Management (TENTATIVE -> CONFIRMED -> LOST -> REMOVED).
+    Multi-Signal Cost Formulation (IoU, Center Distance, BBox Scale Ratio, Constant-Velocity Motion, Temporal Gap),
+    and Explicit Track Lifecycle Management (TENTATIVE -> CONFIRMED -> LOST -> REMOVED).
     """
 
     def __init__(
         self,
-        min_confirmed_hits: int = None,
-        max_lost_frames: int = None,
-        max_lost_seconds: float = None,
+        min_confirmed_hits: Optional[int] = None,
+        max_lost_frames: Optional[int] = None,
+        max_lost_seconds: Optional[float] = None,
         iou_threshold: float = 0.15,
     ):
-        self.min_confirmed_hits = min_confirmed_hits or getattr(settings, "TRACK_MIN_CONFIRMED_HITS", 3)
-        self.max_lost_frames = max_lost_frames or getattr(settings, "TRACK_MAX_LOST_FRAMES", 30)
-        self.max_lost_seconds = max_lost_seconds or getattr(settings, "TRACK_MAX_LOST_SECONDS", 3.0)
+        self.min_confirmed_hits = min_confirmed_hits if min_confirmed_hits is not None else getattr(settings, "TRACK_TENTATIVE_HITS", 2)
+        self.max_lost_frames = max_lost_frames if max_lost_frames is not None else getattr(settings, "TRACK_MAX_LOST_FRAMES", 15)
+        self.max_lost_seconds = max_lost_seconds if max_lost_seconds is not None else getattr(settings, "TRACK_MAX_LOST_SECONDS", 3.5)
         self.iou_threshold = iou_threshold
 
     def predict_track_bbox(self, track: TrackedObject, target_timestamp: float) -> List[float]:
@@ -210,7 +210,7 @@ class SpatialIoUTracker:
             return [0.0, 0.0, 0.0, 0.0]
 
         last_pos = track.positions[-1]["bbox"]
-        if len(track.positions) < 2 or track.velocity_x == 0.0 and track.velocity_y == 0.0:
+        if len(track.positions) < 2 or (track.velocity_x == 0.0 and track.velocity_y == 0.0):
             return list(last_pos)
 
         dt = max(0.0, target_timestamp - track.last_seen)
@@ -225,7 +225,7 @@ class SpatialIoUTracker:
         ]
 
     def update_track_velocity(self, track: TrackedObject) -> None:
-        """Update track velocity (vx, vy) in pixels/sec using last 3 position entries."""
+        """Update track velocity (vx, vy) in pixels/sec using last position entries."""
         if len(track.positions) < 2:
             track.velocity_x = 0.0
             track.velocity_y = 0.0
@@ -251,9 +251,9 @@ class SpatialIoUTracker:
         frame_timestamp: float
     ) -> float:
         """
-        Calculate assignment cost between track and detection.
-        Combines 1 - IoU, center distance, size ratio difference, and velocity prediction.
-        Returns float cost between 0.0 (perfect) and 1000.0 (impossible).
+        Calculate multi-signal assignment cost between track and detection.
+        Combines (1 - IoU), normalized center distance, bbox scale ratio, velocity prediction, and gap penalty.
+        Returns float cost between 0.0 (perfect match) and 1000.0 (invalid assignment).
         """
         track_norm_cls = normalize_class_name(track.canonical_name or track.object_type)
         det_norm_cls = normalize_class_name(det.class_name)
@@ -262,15 +262,25 @@ class SpatialIoUTracker:
         if track_norm_cls != det_norm_cls:
             return 1000.0
 
+        # Cannot assign to a track already updated in the current frame
         gap_sec = frame_timestamp - track.last_seen
-        if gap_sec > self.max_lost_seconds:
+        if gap_sec <= 0.01 or gap_sec > self.max_lost_seconds:
             return 1000.0
 
+        # Predict expected position using motion model
         pred_bbox = self.predict_track_bbox(track, frame_timestamp)
         iou = calculate_bbox_iou(det.bbox, pred_bbox)
-        dist = calculate_center_distance(det.bbox, pred_bbox)
+        raw_iou = calculate_bbox_iou(det.bbox, track.positions[-1]["bbox"]) if track.positions else iou
 
-        # Bbox dimension & scale check
+        dist = calculate_center_distance(det.bbox, pred_bbox)
+        raw_dist = calculate_center_distance(det.bbox, track.positions[-1]["bbox"]) if track.positions else dist
+
+        # Use velocity model predicted position when moving, fallback to raw last position if stationary
+        has_velocity = len(track.positions) >= 2 and (abs(track.velocity_x) > 5.0 or abs(track.velocity_y) > 5.0)
+        effective_iou = iou if has_velocity else max(iou, raw_iou)
+        effective_dist = dist if has_velocity else min(dist, raw_dist)
+
+        # Bbox dimension & scale consistency check
         last_bbox = track.positions[-1]["bbox"] if track.positions else det.bbox
         last_w = max(1.0, last_bbox[2] - last_bbox[0])
         last_h = max(1.0, last_bbox[3] - last_bbox[1])
@@ -278,17 +288,28 @@ class SpatialIoUTracker:
         det_h = max(1.0, det.bbox[3] - det.bbox[1])
 
         scale_ratio = max(det_w / last_w, last_w / det_w, det_h / last_h, last_h / det_h)
-        if scale_ratio > 3.5:  # Sudden unreasonable 3.5x size jump
+        if scale_ratio > 3.5:  # Sudden size jump is impossible for physical objects
             return 1000.0
 
-        box_scale = max(last_w, last_h, 30.0)
-        norm_dist = dist / box_scale
+        box_scale = max(last_w, last_h, 40.0)
+        norm_dist = effective_dist / box_scale
 
-        # Cost matrix formulation
-        if iou >= 0.10:
-            cost = (1.0 - iou) * 0.50 + min(1.0, norm_dist) * 0.35 + min(1.0, (scale_ratio - 1.0)) * 0.15
-        elif norm_dist <= 4.0 or dist <= 150.0:
-            cost = 0.40 + min(0.35, norm_dist * 0.08) + min(0.05, (scale_ratio - 1.0) * 0.05)
+        # Multi-signal Cost formulation
+        w_iou = 0.40
+        w_dist = 0.35
+        w_scale = 0.15
+        w_gap = 0.10
+
+        iou_cost = 1.0 - effective_iou
+        dist_cost = min(1.0, norm_dist / 2.0)
+        scale_cost = min(1.0, (scale_ratio - 1.0) / 2.0)
+        gap_cost = min(1.0, gap_sec / self.max_lost_seconds)
+
+        if effective_iou >= 0.05:
+            cost = w_iou * iou_cost + w_dist * dist_cost + w_scale * scale_cost + w_gap * gap_cost
+        elif effective_dist <= box_scale * 3.0 or effective_dist <= getattr(settings, "TRACK_MERGE_MAX_DISTANCE_PX", 180.0):
+            # Lower overlap due to rapid movement -> rely on center distance & size consistency
+            cost = 0.35 + 0.40 * dist_cost + 0.15 * scale_cost + 0.10 * gap_cost
         else:
             cost = 1000.0
 
@@ -311,16 +332,18 @@ class SpatialIoUTracker:
 
         for frame in sorted_frames:
             raw_detections = frame_detections.get(frame.frame_id, [])
-            
+
             # Intra-frame NMS deduplication for person detections
             person_dets = [d for d in raw_detections if normalize_class_name(d.class_name) == "person"]
             non_person_dets = [d for d in raw_detections if normalize_class_name(d.class_name) != "person"]
-            
+
             deduped_person_dets = []
             for p_det in sorted(person_dets, key=lambda d: d.confidence, reverse=True):
                 is_dup = False
                 for kept in deduped_person_dets:
-                    if calculate_bbox_iou(p_det.bbox, kept.bbox) >= 0.40 or calculate_center_distance(p_det.bbox, kept.bbox) < 25.0:
+                    iou = calculate_bbox_iou(p_det.bbox, kept.bbox)
+                    dist = calculate_center_distance(p_det.bbox, kept.bbox)
+                    if iou >= getattr(settings, "PERSON_NMS_IOU", 0.40) or (dist < 20.0 and iou > 0.25):
                         is_dup = True
                         break
                 if not is_dup:
@@ -329,7 +352,7 @@ class SpatialIoUTracker:
             detections = deduped_person_dets + non_person_dets
             vlm_obs = obs_by_frame.get(frame.frame_id)
 
-            # Filter non-removed active tracks
+            # Filter active tracks (TENTATIVE, CONFIRMED, LOST)
             track_keys = [
                 tid for tid, trk in active_tracks.items()
                 if trk.track_state in ("TENTATIVE", "CONFIRMED", "LOST")
@@ -350,7 +373,7 @@ class SpatialIoUTracker:
 
                 for r, c in zip(row_ind, col_ind):
                     c_val = cost_matrix[r, c]
-                    if c_val < 0.85:  # Valid assignment threshold
+                    if c_val < 0.75:  # Valid assignment cost threshold
                         matched_track_keys.add(track_keys[r])
                         matched_det_indices.add(c)
 
@@ -364,7 +387,7 @@ class SpatialIoUTracker:
                         track.hits_count += 1
                         track.lost_frames_count = 0
 
-                        # Check lifecycle promotion to CONFIRMED
+                        # Lifecycle transition check
                         if track.hits_count >= self.min_confirmed_hits:
                             track.track_state = "CONFIRMED"
                         else:
@@ -392,41 +415,74 @@ class SpatialIoUTracker:
                         track.track_state = "LOST"
                         track.state_history.append({"timestamp": frame.timestamp, "state": "lost"})
 
-            # Process unmatched detections -> Spawn TENTATIVE tracks
+            # Process unmatched detections -> Try trajectory re-association before spawning new track
             for d_idx, det in enumerate(detections):
                 if d_idx not in matched_det_indices:
                     raw_cls = det.class_name
                     norm_cls = normalize_class_name(raw_cls)
                     display_cls = "Ball" if norm_cls == "sports ball" else norm_cls.capitalize()
 
-                    if display_cls not in class_counters:
-                        class_counters[display_cls] = 1
+                    # Check trajectory reassociation with existing recent tracks of same class
+                    # CRITICAL FIX: gap_sec must be > 0.05 to prevent merging distinct entities co-existing in the SAME frame!
+                    reassociated_track = None
+                    max_merge_dist = getattr(settings, "TRACK_MERGE_MAX_DISTANCE_PX", 180.0) if norm_cls == "person" else 220.0
+                    max_merge_gap = getattr(settings, "TRACK_MERGE_MAX_GAP_SEC", 5.0)
 
-                    new_track_id = f"{display_cls} #{class_counters[display_cls]}"
-                    class_counters[display_cls] += 1
-                    det.track_id = new_track_id
+                    for existing_trk in active_tracks.values():
+                        if normalize_class_name(existing_trk.canonical_name or existing_trk.object_type) == norm_cls:
+                            gap_sec = frame.timestamp - existing_trk.last_seen
+                            if 0.05 < gap_sec <= max_merge_gap:
+                                last_bbox = existing_trk.positions[-1]["bbox"] if existing_trk.positions else [0, 0, 0, 0]
+                                dist = calculate_center_distance(det.bbox, last_bbox)
+                                pred_bbox = self.predict_track_bbox(existing_trk, frame.timestamp)
+                                pred_dist = calculate_center_distance(det.bbox, pred_bbox)
 
-                    initial_state = "CONFIRMED" if self.min_confirmed_hits <= 1 else "TENTATIVE"
+                                if min(dist, pred_dist) <= max_merge_dist:
+                                    reassociated_track = existing_trk
+                                    break
 
-                    active_tracks[new_track_id] = TrackedObject(
-                        track_id=new_track_id,
-                        object_type=raw_cls,
-                        canonical_name=norm_cls,
-                        first_seen=frame.timestamp,
-                        last_seen=frame.timestamp,
-                        positions=[{"timestamp": frame.timestamp, "bbox": det.bbox}],
-                        activities=[],
-                        interactions=[],
-                        lifecycle_events=["appeared"],
-                        state_history=[{"timestamp": frame.timestamp, "state": "appeared"}],
-                        detection_count=1,
-                        avg_confidence=det.confidence,
-                        track_state=initial_state,
-                        hits_count=1,
-                        lost_frames_count=0,
-                        is_unique_person=(norm_cls == "person"),
-                        is_unique_object=(norm_cls != "person"),
-                    )
+                    if reassociated_track is not None:
+                        # Merge unmatched detection into existing track
+                        det.track_id = reassociated_track.track_id
+                        reassociated_track.last_seen = frame.timestamp
+                        reassociated_track.detection_count += 1
+                        reassociated_track.hits_count += 1
+                        reassociated_track.lost_frames_count = 0
+                        reassociated_track.track_state = "CONFIRMED"
+                        reassociated_track.positions.append({"timestamp": frame.timestamp, "bbox": det.bbox})
+                        reassociated_track.state_history.append({"timestamp": frame.timestamp, "state": "reassociated"})
+                        self.update_track_velocity(reassociated_track)
+                        logger.info(f"Re-associated unmatched person detection into existing track {reassociated_track.track_id}")
+                    else:
+                        # Spawn new TENTATIVE track
+                        if display_cls not in class_counters:
+                            class_counters[display_cls] = 1
+
+                        new_track_id = f"{display_cls} #{class_counters[display_cls]}"
+                        class_counters[display_cls] += 1
+                        det.track_id = new_track_id
+
+                        initial_state = "CONFIRMED" if self.min_confirmed_hits <= 1 else "TENTATIVE"
+
+                        active_tracks[new_track_id] = TrackedObject(
+                            track_id=new_track_id,
+                            object_type=raw_cls,
+                            canonical_name=norm_cls,
+                            first_seen=frame.timestamp,
+                            last_seen=frame.timestamp,
+                            positions=[{"timestamp": frame.timestamp, "bbox": det.bbox}],
+                            activities=[],
+                            interactions=[],
+                            lifecycle_events=["appeared"],
+                            state_history=[{"timestamp": frame.timestamp, "state": "appeared"}],
+                            detection_count=1,
+                            avg_confidence=det.confidence,
+                            track_state=initial_state,
+                            hits_count=1,
+                            lost_frames_count=0,
+                            is_unique_person=(norm_cls == "person"),
+                            is_unique_object=(norm_cls != "person"),
+                        )
 
             # Attach VLM activities & interactions
             if vlm_obs:
@@ -441,12 +497,21 @@ class SpatialIoUTracker:
                                 trk.interactions.append(inter)
 
         # Filter confirmed/valid tracks for output
-        effective_min_hits = min(self.min_confirmed_hits, max(1, len(sorted_frames)))
         output_tracks: List[TrackedObject] = []
+        num_frames = len(sorted_frames)
+
         for trk in active_tracks.values():
             is_person = is_person_class(trk.canonical_name) or is_person_class(trk.object_type)
-            min_hits = 1 if (is_person or len(sorted_frames) <= 5) else effective_min_hits
-            if trk.hits_count >= min_hits or trk.track_state == "CONFIRMED":
+            
+            # Enforce confirmation hit requirements
+            if is_person:
+                # Require min_confirmed_hits unless total sampled frames is 1
+                min_req = 1 if num_frames <= 1 else self.min_confirmed_hits
+                is_valid = trk.hits_count >= min_req or trk.track_state == "CONFIRMED"
+            else:
+                is_valid = trk.hits_count >= 1 or trk.track_state == "CONFIRMED"
+
+            if is_valid:
                 trk.track_state = "CONFIRMED"
                 trk.is_unique_person = is_person
                 trk.is_unique_object = not is_person
@@ -492,3 +557,4 @@ class SpatialIoUTracker:
 
 
 object_tracker = SpatialIoUTracker()
+

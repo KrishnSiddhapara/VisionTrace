@@ -38,7 +38,7 @@ JSON Schema:
   "people": [
     {
       "temporary_id": "string (e.g. Person #1)",
-      "description": "string (clothing, visual features)",
+      "description": "string (concise shortnote summary describing motion stance, displacement, key activities, and visual features)",
       "first_seen": "string (timestamp e.g. 00:05)",
       "last_seen": "string (timestamp e.g. 00:52)",
       "activities": ["string"],

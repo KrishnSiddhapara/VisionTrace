@@ -158,6 +158,35 @@ def run_pipeline_with_progress(
     phys_objects = physical_object_registry.reconcile_tracks(tracks, frame_obs_list)
     non_person_phys = [po for po in phys_objects if po.canonical_name != "person"]
 
+    raw_person_dets_cnt = sum(
+        len([d for d in det_list if d.class_name.lower() in ("person", "people", "human", "man", "woman", "child", "kid", "player")])
+        for det_list in yolo_dets.values()
+    )
+    confirmed_person_tracks_cnt = len([t for t in tracks if t.canonical_name == "person"])
+    canonical_person_cnt = len(person_entities)
+
+    logger.info(
+        f"[PERSON COUNT CONSISTENCY CHECK] Raw Person Detections: {raw_person_dets_cnt} | "
+        f"Confirmed Person Tracks: {confirmed_person_tracks_cnt} | "
+        f"Canonical Person Entities: {canonical_person_cnt}"
+    )
+
+    if confirmed_person_tracks_cnt > 0 and canonical_person_cnt > int(confirmed_person_tracks_cnt * 1.5):
+        logger.warning(
+            f"WARNING: Potential person identity fragmentation detected. "
+            f"Raw detections: {raw_person_dets_cnt}, Confirmed tracks: {confirmed_person_tracks_cnt}, Canonical people: {canonical_person_cnt}"
+        )
+
+    # Debug Frame Visualization if DEBUG_PERSON_TRACKING is enabled
+    if getattr(settings, "DEBUG_PERSON_TRACKING", False):
+        try:
+            from utils.debug_visualizer import render_debug_tracking_frames
+            debug_out_dir = settings.OUTPUTS_DIR / metadata.video_hash / "debug_tracks"
+            render_debug_tracking_frames(sampled_frames, yolo_dets, tracks, person_entities, debug_out_dir)
+            logger.info(f"[DEBUG VISUALIZER] Generated annotated person tracking debug frames in {debug_out_dir}")
+        except Exception as dbg_err:
+            logger.warning(f"[DEBUG VISUALIZER] Failed to render debug frames: {dbg_err}")
+
     analyzed_cnt = len([o for o in frame_obs_list if o.is_analyzed])
     skipped_cnt = len([o for o in frame_obs_list if not o.is_analyzed])
     avg_c = float(sum(e.confidence for e in verified_events) / max(1, len(verified_events)))
@@ -180,8 +209,13 @@ def run_pipeline_with_progress(
         verified_events_count=len(verified_events),
         rejected_events_count=max(0, len(candidate_events) - len(verified_events)),
         average_confidence=round(avg_c, 2),
-        unique_people_count=len(person_entities),
+        raw_yolo_detections=sum(len(d) for d in yolo_dets.values()),
+        confirmed_person_detections=confirmed_person_tracks_cnt,
+        unique_people_count=canonical_person_cnt,
         unique_objects_count=len(non_person_phys),
+        active_tracks_count=len([t for t in tracks if t.track_state == "CONFIRMED"]),
+        lost_tracks_count=len([t for t in tracks if t.track_state == "LOST"]),
+        rejected_tracks_count=len([t for t in tracks if t.track_state == "TENTATIVE"]),
     )
 
     memory = VideoMemory(

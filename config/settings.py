@@ -24,15 +24,22 @@ class Settings:
     # YOLO & Multi-Object Tracking Settings
     YOLO_MODEL: str = os.getenv("YOLO_MODEL", "yolov8m.pt")
     YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
+    PERSON_CONFIDENCE: float = float(os.getenv("PERSON_CONFIDENCE", "0.55"))
+    PERSON_NMS_IOU: float = float(os.getenv("PERSON_NMS_IOU", "0.40"))
     YOLO_IOU_THRESHOLD: float = float(os.getenv("YOLO_IOU_THRESHOLD", "0.50"))
-    YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
+    YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "960"))
     YOLO_MAX_DET: int = int(os.getenv("YOLO_MAX_DET", "300"))
     
     # Tracking Lifecycle & Association Parameters
-    TRACK_MIN_CONFIRMED_HITS: int = int(os.getenv("TRACK_MIN_CONFIRMED_HITS", "3"))
-    TRACK_MAX_LOST_FRAMES: int = int(os.getenv("TRACK_MAX_LOST_FRAMES", "30"))
-    TRACK_MAX_LOST_SECONDS: float = float(os.getenv("TRACK_MAX_LOST_SECONDS", "3.0"))
+    TRACK_MIN_CONFIRMED_HITS: int = int(os.getenv("TRACK_MIN_CONFIRMED_HITS", "2"))
+    TRACK_TENTATIVE_HITS: int = int(os.getenv("TRACK_TENTATIVE_HITS", "2"))
+    TRACK_MAX_LOST_FRAMES: int = int(os.getenv("TRACK_MAX_LOST_FRAMES", "15"))
+    TRACK_MAX_LOST_SECONDS: float = float(os.getenv("TRACK_MAX_LOST_SECONDS", "3.5"))
+    TRACK_MERGE_MAX_DISTANCE_PX: float = float(os.getenv("TRACK_MERGE_MAX_DISTANCE_PX", "150.0"))
+    TRACK_MERGE_MAX_GAP_SEC: float = float(os.getenv("TRACK_MERGE_MAX_GAP_SEC", "5.0"))
     TRACKING_SAMPLE_FPS: float = float(os.getenv("TRACKING_SAMPLE_FPS", "5.0"))
+    TRACKING_VERSION: str = "v3.2_multi_signal"
+    DEBUG_PERSON_TRACKING: bool = os.getenv("DEBUG_PERSON_TRACKING", "False").lower() in ("true", "1", "yes")
     
     # VLM Budget Limits by Profile Mode (Optimized for speed & precision)
     VLM_MAX_FRAMES_FAST: int = int(os.getenv("VLM_MAX_FRAMES_FAST", "6"))

@@ -193,21 +193,16 @@ class TemporalReasoner:
             m_s, s_s = divmod(pe.first_seen, 60)
             m_e, s_e = divmod(pe.last_seen, 60)
 
-            acts = pe.activities or ["Present in scene"]
-            mvts = pe.lifecycle_events or (
-                [f"Moved across scene ({pe.movement_distance:.1f}px)"]
-                if pe.motion_state == "MOVING"
-                else ["Stationary stance in visible area"]
-            )
+            short_note_str = pe.get_shortnote_description()
 
             final_people.append(
                 FinalPersonRecord(
                     temporary_id=pe.person_id,
-                    description=f"Person entity ({pe.person_id}, {pe.motion_state.lower()})",
+                    description=short_note_str,
                     first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
                     last_seen=f"{int(m_e):02d}:{s_e:04.1f}",
-                    activities=acts,
-                    movements=mvts,
+                    activities=pe.activities,
+                    movements=pe.lifecycle_events or [f"{pe.motion_state.capitalize()} stance"],
                     interactions=pe.interactions,
                     confidence=round(pe.avg_confidence, 2),
                 )
