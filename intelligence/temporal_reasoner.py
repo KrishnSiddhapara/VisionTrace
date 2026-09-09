@@ -184,50 +184,35 @@ class TemporalReasoner:
                             )
                         )
 
-        # 2. Aggregate People Entities
-        person_phys = [
-            po for po in physical_objects
-            if po.canonical_name == "person"
-        ]
+        # 2. Aggregate People Entities using CanonicalPersonRegistry (Single Source of Truth)
+        from vision.person_registry import canonical_person_registry
+        person_entities = canonical_person_registry.reconcile_person_tracks(tracks, frame_observations, metadata)
         final_people = []
 
-        for i, po in enumerate(person_phys, start=1):
-            m_s, s_s = divmod(po.first_seen, 60)
-            m_e, s_e = divmod(po.last_seen, 60)
+        for pe in person_entities:
+            m_s, s_s = divmod(pe.first_seen, 60)
+            m_e, s_e = divmod(pe.last_seen, 60)
 
-            activities = po.activities or ["Navigating scene area"]
-            movements = po.lifecycle_events or ["Entered visible area", "Moved across scene"]
+            acts = pe.activities or ["Present in scene"]
+            mvts = pe.lifecycle_events or (
+                [f"Moved across scene ({pe.movement_distance:.1f}px)"]
+                if pe.motion_state == "MOVING"
+                else ["Stationary stance in visible area"]
+            )
 
             final_people.append(
                 FinalPersonRecord(
-                    temporary_id=f"Person #{i}",
-                    description=f"Person entity ({po.object_id})",
+                    temporary_id=pe.person_id,
+                    description=f"Person entity ({pe.person_id}, {pe.motion_state.lower()})",
                     first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
                     last_seen=f"{int(m_e):02d}:{s_e:04.1f}",
-                    activities=activities,
-                    movements=movements,
-                    interactions=po.interactions,
-                    confidence=round(po.avg_confidence, 2),
+                    activities=acts,
+                    movements=mvts,
+                    interactions=pe.interactions,
+                    confidence=round(pe.avg_confidence, 2),
                 )
             )
 
-        if not final_people and any(obs.people for obs in frame_observations):
-            obs_people_ts = [o.timestamp for o in frame_observations if o.people]
-            if obs_people_ts:
-                m_s, s_s = divmod(min(obs_people_ts), 60)
-                m_e, s_e = divmod(max(obs_people_ts), 60)
-                final_people.append(
-                    FinalPersonRecord(
-                        temporary_id="Person #1",
-                        description="Person observed in frame keyframes",
-                        first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
-                        last_seen=f"{int(m_e):02d}:{s_e:04.1f}",
-                        activities=["Observed in frame keyframes"],
-                        movements=["Moved across visible area"],
-                        interactions=[],
-                        confidence=0.85,
-                    )
-                )
 
         # 3. Generate Chronological Final Description
         chronological_events = [t for t in timeline if t.get("description")]

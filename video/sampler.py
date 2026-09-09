@@ -282,11 +282,62 @@ class AdaptiveFrameSampler:
                 existing_timestamps.add(st_round)
                 global_counter += 1
 
-                if len(dense_frames) >= settings.MAX_VLM_FRAMES + 30:
+                max_vlm = getattr(settings, "MAX_VLM_FRAMES", 30)
+                if len(dense_frames) >= max_vlm + 30:
                     break
 
         dense_frames.sort(key=lambda f: f.timestamp)
         logger.info(f"Pass 2 Event-Focused Dense Sampler extracted {len(dense_frames) - len(existing_frames)} additional verification frames.")
         return dense_frames
+
+    def extract_tracking_frames(
+        self,
+        video_path: Union[str, Path],
+        output_dir: Union[str, Path],
+        target_fps: float = 5.0
+    ) -> List[SampledFrame]:
+        """
+        Extract continuous sub-sampled frames for internal multi-object tracking.
+        Ensures high temporal continuity across crossings, occlusions, and fast motion.
+        """
+        path = Path(video_path)
+        trk_dir = Path(output_dir) / "tracking_frames"
+        trk_dir.mkdir(parents=True, exist_ok=True)
+
+        video_frame_provider.set_video(path)
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        cap.release()
+
+        step = max(1, int(round(fps / max(0.5, target_fps))))
+        tracking_frames: List[SampledFrame] = []
+        counter = 1
+
+        for frame_idx, frame in video_frame_provider.iterate_frames(step=step):
+            ts = round(frame_idx / fps, 2)
+            frame_filename = f"trk_frame_{frame_idx:06d}.jpg"
+            save_path = trk_dir / frame_filename
+
+            if not save_path.exists() or save_path.stat().st_size == 0:
+                cv2.imwrite(str(save_path), frame)
+
+            sf = SampledFrame(
+                frame_id=f"trk_frame_{counter:04d}",
+                timestamp=ts,
+                frame_index=frame_idx,
+                path=str(save_path.resolve()),
+                scene_id=1,
+                sampling_reason="continuous_tracking",
+                selection_reason="continuous_tracking",
+            )
+            tracking_frames.append(sf)
+            counter += 1
+
+        logger.info(f"[Tracking Frame Sampler] Extracted {len(tracking_frames)} continuous tracking frames @ ~{target_fps} FPS out of {total_frames} total frames.")
+        return tracking_frames
 
 frame_sampler = AdaptiveFrameSampler()

@@ -1,0 +1,12 @@
+{
+  "name": "visiontrace-ai",
+  "version": "2.0.0",
+  "private": true,
+  "description": "VisionTrace AI - Professional Video Intelligence Platform",
+  "scripts": {
+    "dev": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "start": "python app.py"
+  },
+  "keywords": ["video-intelligence", "computer-vision", "yolo", "vlm", "tracking"]
+}

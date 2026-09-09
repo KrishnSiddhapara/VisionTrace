@@ -366,7 +366,7 @@ def render_dashboard() -> None:
                 "💬 Ask AI (Q&A)",
                 "🔎 Semantic Search",
                 "🎯 BBox Debugger",
-                "📑 Report & Export",
+                "📑 Comprehensive Report",
                 "📊 Developer Dashboard",
             ])
 
@@ -441,21 +441,21 @@ def render_dashboard() -> None:
             with tabs[9]:
                 render_bbox_debug_visualizer(memory.sampled_frames, memory.yolo_detections)
 
-            # Tab 10: Report & Export
+            # Tab 10: Grounded Video Intelligence Report
             with tabs[10]:
-                st.subheader("📑 Generate & Export Comprehensive Report")
-                reports = report_generator.generate_all_reports(memory)
+                st.subheader("📑 Grounded Video Intelligence Report")
+                st.info("Comprehensive visual intelligence summary grounded in frame observations, entity trajectories, and verified timeline events.")
 
-                col_j, col_c, col_p = st.columns(3)
-                with col_j:
-                    with open(reports["json"], "rb") as f:
-                        st.download_button("📥 Download JSON Report", f, file_name=reports["json"].name, mime="application/json")
-                with col_c:
-                    with open(reports["csv"], "rb") as f:
-                        st.download_button("📥 Download CSV Events", f, file_name=reports["csv"].name, mime="text/csv")
-                with col_p:
-                    with open(reports["pdf"], "rb") as f:
-                        st.download_button("📥 Download PDF Report", f, file_name=reports["pdf"].name, mime="application/pdf")
+                if memory.summary:
+                    st.markdown("### 📌 Executive Overview")
+                    st.write(memory.summary.get("standard", memory.summary.get("quick", "No summary available.")))
+
+                    st.markdown("### 📋 Chronological Breakdown")
+                    st.write(memory.summary.get("detailed", "No detailed timeline logged."))
+
+                    st.markdown("### 🔬 Grounded Facts & Metrics")
+                    st.code(memory.summary.get("technical", ""), language="yaml")
+
 
             # Tab 11: Developer Dashboard
             with tabs[11]:

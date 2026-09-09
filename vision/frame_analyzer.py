@@ -125,17 +125,52 @@ class FrameAnalyzer:
 
         # 5. Parse people observations
         people_obs = []
-        for p in raw_json.get("people", []):
-            if isinstance(p, dict):
-                people_obs.append(
-                    PersonObservation(
-                        temporary_id=p.get("temporary_id"),
-                        description=p.get("description", "Person detected"),
-                        activity=p.get("activity"),
-                        location=p.get("location"),
-                        confidence=float(p.get("confidence", 0.9)),
+        raw_people = raw_json.get("people", [])
+        if isinstance(raw_people, list):
+            for idx, p in enumerate(raw_people, start=1):
+                if isinstance(p, dict):
+                    people_obs.append(
+                        PersonObservation(
+                            temporary_id=p.get("temporary_id") or f"Person #{idx}",
+                            description=p.get("description", "Person detected"),
+                            activity=p.get("activity"),
+                            location=p.get("location"),
+                            confidence=float(p.get("confidence", 0.9)),
+                        )
                     )
-                )
+                elif isinstance(p, str) and p.strip():
+                    people_obs.append(
+                        PersonObservation(
+                            temporary_id=f"Person #{idx}",
+                            description=p.strip(),
+                            activity=p.strip(),
+                            confidence=0.88,
+                        )
+                    )
+
+        # Fallback if people_obs is empty but text observations explicitly mention people/children
+        if not people_obs:
+            import re
+            all_texts = _ensure_list(raw_json.get("observations")) + _ensure_list(raw_json.get("activities"))
+            num_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+            extracted_cnt = 0
+            for txt in all_texts:
+                matches = re.findall(r'(\b\d+|\bone|\btwo|\bthree|\bfour|\bfive|\bsix|\bseven|\beight|\bnine|\bten)\s+(?:children|kids|boys|girls|toddlers|babies|people|humans|players|persons)', txt.lower())
+                for m in matches:
+                    val = int(m) if m.isdigit() else num_map.get(m, 0)
+                    if val > extracted_cnt:
+                        extracted_cnt = val
+
+            if extracted_cnt > 0:
+                for k in range(1, extracted_cnt + 1):
+                    people_obs.append(
+                        PersonObservation(
+                            temporary_id=f"Person #{k}",
+                            description="Child / person detected in scene",
+                            activity="Present in visual scene",
+                            confidence=0.88,
+                        )
+                    )
 
         # 6. Parse main object observations (Filter out unnecessary static background clutter)
         from vision.tracker import is_main_object

@@ -214,15 +214,16 @@ def render_header() -> None:
         <div class="hero-container">
             <div class="hero-title">
                 🎥 VisionTrace AI
-                <span class="status-badge badge-info">VLM Video Intelligence</span>
+                <span class="status-badge badge-info">Visual Video Analysis</span>
             </div>
             <div class="hero-subtitle">
-                Advanced Visual Understanding, Object Tracking, Event Reasoning & Natural Language Video Q&A Platform
+                Simple, fast visual video analysis with object detection, movement tracking, key frame selection & AI summary.
             </div>
         </div>
         """,
         unsafe_allow_html=True
     )
+
 
 
 def render_metric_card(label: str, value: str, subtext: str = "") -> None:

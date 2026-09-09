@@ -160,6 +160,45 @@ class PhysicalObjectRegistry:
         logger.info(
             f"[Object Registry] Canonical reconciliation reduced {len(tracks)} tracks to {len(physical_objects)} physical objects."
         )
-        return physical_objects
+
+        # Post-reconciliation constraint: Merge non-concurrent tracks of the same category
+        # Ensures that a single physical object (e.g. 1 soccer ball) isn't counted as multiple objects due to track breaks.
+        by_category: Dict[str, List[PhysicalObject]] = {}
+        for po in physical_objects:
+            by_category.setdefault(po.canonical_name, []).append(po)
+
+        final_reconciled: List[PhysicalObject] = []
+        for cat, po_list in by_category.items():
+            if len(po_list) <= 1:
+                final_reconciled.extend(po_list)
+                continue
+
+            po_list_sorted = sorted(po_list, key=lambda x: x.first_seen)
+            merged_list: List[PhysicalObject] = [po_list_sorted[0]]
+            for next_po in po_list_sorted[1:]:
+                prev_po = merged_list[-1]
+                # Calculate time overlap between the two physical object tracks
+                overlap = min(prev_po.last_seen, next_po.last_seen) - max(prev_po.first_seen, next_po.first_seen)
+                # If non-overlapping or minimal overlap (e.g. < 1.5s), merge into single physical object identity
+                if overlap <= 1.5:
+                    prev_po.track_ids.extend(next_po.track_ids)
+                    prev_po.last_seen = max(prev_po.last_seen, next_po.last_seen)
+                    prev_po.positions.extend(next_po.positions)
+                    for act in next_po.activities:
+                        if act not in prev_po.activities:
+                            prev_po.activities.append(act)
+                    for inter in next_po.interactions:
+                        if inter not in prev_po.interactions:
+                            prev_po.interactions.append(inter)
+                    for lc in next_po.lifecycle_events:
+                        if lc not in prev_po.lifecycle_events:
+                            prev_po.lifecycle_events.append(lc)
+                else:
+                    merged_list.append(next_po)
+            final_reconciled.extend(merged_list)
+
+        return final_reconciled
+
 
 physical_object_registry = PhysicalObjectRegistry()
+

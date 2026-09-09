@@ -22,13 +22,13 @@ class OpenCVMovementDetector:
         self.min_motion_area = min_motion_area or settings.MIN_MOTION_AREA
         self.change_threshold = change_threshold or settings.CHANGE_THRESHOLD
 
-    def detect_global_camera_motion(self, prev_gray: np.ndarray, curr_gray: np.ndarray) -> Tuple[bool, float]:
+    def detect_global_camera_motion(self, prev_gray: np.ndarray, curr_gray: np.ndarray) -> Tuple[bool, float, float, float]:
         """
         Estimate global camera motion (panning, tilting, camera shake) using Farneback Optical Flow.
-        Returns (is_camera_motion, mean_magnitude).
+        Returns (is_camera_motion, mean_magnitude, shift_x, shift_y).
         """
         if prev_gray is None or curr_gray is None or prev_gray.shape != curr_gray.shape:
-            return False, 0.0
+            return False, 0.0, 0.0, 0.0
 
         try:
             # Downsample for fast optical flow estimation
@@ -51,12 +51,28 @@ class OpenCVMovementDetector:
             mean_mag = float(np.mean(magnitude))
             std_mag = float(np.std(magnitude))
 
-            # Camera motion characteristic: uniform non-zero motion vectors across >75% of frame
+            # Mean global translation vector in scaled resolution -> upscale to original
+            scale_inv = 1.0 / scale if scale < 1.0 else 1.0
+            shift_x = float(np.median(fx)) * scale_inv
+            shift_y = float(np.median(fy)) * scale_inv
+
+            # Camera motion characteristic: uniform non-zero motion vectors across frame
             is_uniform_motion = mean_mag > 1.2 and (std_mag / max(0.1, mean_mag)) < 0.65
-            return is_uniform_motion, round(mean_mag, 2)
+            return is_uniform_motion, round(mean_mag, 2), round(shift_x, 2), round(shift_y, 2)
         except Exception as e:
             logger.warning(f"Error computing optical flow: {e}")
-            return False, 0.0
+            return False, 0.0, 0.0, 0.0
+
+    def compensate_camera_motion(self, bbox: List[float], shift_x: float, shift_y: float) -> List[float]:
+        """Subtract camera translation shift from bounding box to obtain true object displacement."""
+        if not bbox or len(bbox) < 4:
+            return bbox
+        return [
+            round(bbox[0] - shift_x, 1),
+            round(bbox[1] - shift_y, 1),
+            round(bbox[2] - shift_x, 1),
+            round(bbox[3] - shift_y, 1),
+        ]
 
     def analyze_frame_motion(
         self,
@@ -125,8 +141,9 @@ class OpenCVMovementDetector:
 
         # 6. Global Camera Motion Check
         is_camera_motion = False
+        camera_shift_x, camera_shift_y = 0.0, 0.0
         if settings.USE_OPTICAL_FLOW and prev_blur is not None:
-            is_camera_motion, _ = self.detect_global_camera_motion(prev_blur, curr_blur)
+            is_camera_motion, _, camera_shift_x, camera_shift_y = self.detect_global_camera_motion(prev_blur, curr_blur)
 
         # 7. Combined Motion & Change Score
         raw_score = (

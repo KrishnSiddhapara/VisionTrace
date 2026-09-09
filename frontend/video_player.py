@@ -29,14 +29,12 @@ def render_video_player(metadata: VideoMetadata) -> None:
     with col2:
         st.subheader("📊 Video Information")
         st.markdown(f"**Filename:** `{metadata.filename}`")
-        st.markdown(f"**Video Hash:** `{metadata.video_hash[:12]}...`")
 
         mcol1, mcol2 = st.columns(2)
         with mcol1:
-            render_metric_card("Duration", seconds_to_timestamp(metadata.duration_sec), f"{metadata.duration_sec:.1f} seconds")
-            render_metric_card("FPS", f"{metadata.fps:.2f}", "Frames Per Second")
+            render_metric_card("Duration", seconds_to_timestamp(metadata.duration_sec), f"{metadata.duration_sec:.1f}s")
+            render_metric_card("FPS", f"{metadata.fps:.2f}")
         with mcol2:
-            render_metric_card("Resolution", metadata.resolution_str, f"{metadata.width}x{metadata.height}")
-            render_metric_card("Frame Count", f"{metadata.frame_count:,}", f"Codec: {metadata.codec}")
+            render_metric_card("Resolution", metadata.resolution_str)
+            render_metric_card("Frame Count", f"{metadata.frame_count:,}")
 
-        st.markdown(f"**File Size:** `{metadata.file_size_mb:.2f} MB`")

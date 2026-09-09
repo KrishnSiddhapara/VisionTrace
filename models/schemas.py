@@ -60,6 +60,13 @@ class YOLODetection(BaseModel):
     confidence: float
     bbox: List[float]  # [x1, y1, x2, y2]
     track_id: Optional[str] = None
+    center_x: float = 0.0
+    center_y: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+    area: float = 0.0
+    frame_index: int = 0
+    timestamp: float = 0.0
 
 
 class PersonObservation(BaseModel):
@@ -112,6 +119,16 @@ class TrackedObject(BaseModel):
     state_history: List[Dict[str, Any]] = Field(default_factory=list)  # [{'timestamp': 1.2, 'state': 'on_table'}]
     detection_count: int = 1
     avg_confidence: float = 0.90
+    track_state: str = "CONFIRMED"  # 'TENTATIVE', 'CONFIRMED', 'LOST', 'REMOVED'
+    hits_count: int = 1
+    lost_frames_count: int = 0
+    velocity_x: float = 0.0
+    velocity_y: float = 0.0
+    movement_confidence: float = 0.0
+    movement_distance: float = 0.0
+    movement_direction: str = "static"
+    is_unique_person: bool = False
+    is_unique_object: bool = False
 
 
 class VideoEvent(BaseModel):
@@ -146,6 +163,7 @@ class QAResponse(BaseModel):
     observed_facts: List[str] = Field(default_factory=list)
     inferred_facts: List[str] = Field(default_factory=list)
     unknown_aspects: List[str] = Field(default_factory=list)
+    debug_info: Optional[Dict[str, Any]] = None
 
 
 class DeveloperMetrics(BaseModel):
@@ -159,13 +177,22 @@ class DeveloperMetrics(BaseModel):
     vlm_calls: int = 0
     vlm_retries: int = 0
     vlm_failures: int = 0
-    yolo_confidence_threshold: float = 0.45
+    yolo_confidence_threshold: float = 0.60
     yolo_detections_count: int = 0
     tracked_entities_count: int = 0
     candidate_events_count: int = 0
     verified_events_count: int = 0
     rejected_events_count: int = 0
     average_confidence: float = 0.0
+    raw_yolo_detections: int = 0
+    confirmed_person_detections: int = 0
+    unique_people_count: int = 0
+    unique_objects_count: int = 0
+    active_tracks_count: int = 0
+    lost_tracks_count: int = 0
+    rejected_tracks_count: int = 0
+    identity_switches_count: int = 0
+    camera_motion_detected: bool = False
 
 
 class FinalObjectRecord(BaseModel):
@@ -204,9 +231,11 @@ class VideoMemory(BaseModel):
     frame_observations: List[FrameObservation] = Field(default_factory=list)
     yolo_detections: Dict[str, List[YOLODetection]] = Field(default_factory=dict)  # frame_id -> detections
     tracks: List[TrackedObject] = Field(default_factory=list)
+    person_entities: List[Any] = Field(default_factory=list)
     events: List[VideoEvent] = Field(default_factory=list)
     timeline: List[Dict[str, Any]] = Field(default_factory=list)
     summary: Dict[str, str] = Field(default_factory=dict)  # 'quick', 'standard', 'detailed', 'technical'
     final_summary: Optional[FinalSummary] = None
     insights: List[TemporalInsight] = Field(default_factory=list)
     developer_metrics: Optional[DeveloperMetrics] = None
+

@@ -21,13 +21,23 @@ class Settings:
     MAX_VIDEO_SIZE_MB: float = float(os.getenv("MAX_VIDEO_SIZE_MB", "200"))
     MAX_VIDEO_DURATION_SEC: float = float(os.getenv("MAX_VIDEO_DURATION_SEC", "600"))
     DEFAULT_SAMPLE_INTERVAL_SEC: float = float(os.getenv("DEFAULT_SAMPLE_INTERVAL_SEC", "5"))
-    MAX_VLM_FRAMES: int = int(os.getenv("MAX_VLM_FRAMES", "100"))
-    YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.45"))
+    # YOLO & Multi-Object Tracking Settings
+    YOLO_MODEL: str = os.getenv("YOLO_MODEL", "yolov8m.pt")
+    YOLO_CONFIDENCE: float = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
+    YOLO_IOU_THRESHOLD: float = float(os.getenv("YOLO_IOU_THRESHOLD", "0.50"))
+    YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
+    YOLO_MAX_DET: int = int(os.getenv("YOLO_MAX_DET", "300"))
     
-    # VLM Budget Limits by Profile Mode
-    VLM_MAX_FRAMES_FAST: int = int(os.getenv("VLM_MAX_FRAMES_FAST", "8"))
-    VLM_MAX_FRAMES_BALANCED: int = int(os.getenv("VLM_MAX_FRAMES_BALANCED", "16"))
-    VLM_MAX_FRAMES_DEEP: int = int(os.getenv("VLM_MAX_FRAMES_DEEP", "30"))
+    # Tracking Lifecycle & Association Parameters
+    TRACK_MIN_CONFIRMED_HITS: int = int(os.getenv("TRACK_MIN_CONFIRMED_HITS", "3"))
+    TRACK_MAX_LOST_FRAMES: int = int(os.getenv("TRACK_MAX_LOST_FRAMES", "30"))
+    TRACK_MAX_LOST_SECONDS: float = float(os.getenv("TRACK_MAX_LOST_SECONDS", "3.0"))
+    TRACKING_SAMPLE_FPS: float = float(os.getenv("TRACKING_SAMPLE_FPS", "5.0"))
+    
+    # VLM Budget Limits by Profile Mode (Optimized for speed & precision)
+    VLM_MAX_FRAMES_FAST: int = int(os.getenv("VLM_MAX_FRAMES_FAST", "6"))
+    VLM_MAX_FRAMES_BALANCED: int = int(os.getenv("VLM_MAX_FRAMES_BALANCED", "10"))
+    VLM_MAX_FRAMES_DEEP: int = int(os.getenv("VLM_MAX_FRAMES_DEEP", "18"))
 
     # Inference Resolution Optimization (downscale large 4K frames for fast OpenCV/YOLO inference)
     INFERENCE_MAX_WIDTH: int = int(os.getenv("INFERENCE_MAX_WIDTH", "1280"))

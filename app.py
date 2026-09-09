@@ -1,14 +1,11 @@
-# pyrefly: ignore [missing-import]
-import streamlit as st
-
-st.set_page_config(
-    page_title="VisionTrace AI - Video Intelligence Platform",
-    page_icon="🎥",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-from frontend.dashboard import render_dashboard
+"""
+VisionTrace AI - Professional AI Video Intelligence Platform
+Entry point server launcher.
+"""
+import uvicorn
 
 if __name__ == "__main__":
-    render_dashboard()
+    print("==========================================================")
+    print("Starting VisionTrace AI Platform Server on http://localhost:8000")
+    print("==========================================================")
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
