@@ -31,6 +31,11 @@ class Settings:
     YOLO_MAX_DET: int = int(os.getenv("YOLO_MAX_DET", "300"))
     
     # Tracking Lifecycle & Association Parameters
+    PERSON_MIN_CONFIRMATION_HITS: int = int(os.getenv("PERSON_MIN_CONFIRMATION_HITS", "2"))
+    PERSON_MIN_CONFIRMATION_RATIO: float = float(os.getenv("PERSON_MIN_CONFIRMATION_RATIO", "0.35"))
+    PERSON_MAX_ASSOCIATION_DISTANCE_RATIO: float = float(os.getenv("PERSON_MAX_ASSOCIATION_DISTANCE_RATIO", "2.2"))
+    PERSON_MAX_SCALE_CHANGE: float = float(os.getenv("PERSON_MAX_SCALE_CHANGE", "3.0"))
+    PERSON_MAX_OCCLUSION_SECONDS: float = float(os.getenv("PERSON_MAX_OCCLUSION_SECONDS", "8.0"))
     TRACK_MIN_CONFIRMED_HITS: int = int(os.getenv("TRACK_MIN_CONFIRMED_HITS", "2"))
     TRACK_TENTATIVE_HITS: int = int(os.getenv("TRACK_TENTATIVE_HITS", "2"))
     TRACK_MAX_LOST_FRAMES: int = int(os.getenv("TRACK_MAX_LOST_FRAMES", "15"))

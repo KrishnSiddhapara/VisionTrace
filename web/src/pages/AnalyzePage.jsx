@@ -516,11 +516,20 @@ export default function AnalyzePage({ activeMemory, setActiveMemory, seekTime, o
                             </div>
                           </div>
 
-                          <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/15 space-y-1">
+                          <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/15 space-y-1.5">
                             <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider block">Shortnote Description:</span>
                             <p className="text-xs text-slate-200 font-mono leading-relaxed">
                               {shortNote}
                             </p>
+                            {person.objects_held && person.objects_held.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {person.objects_held.map((obj, oIdx) => (
+                                  <span key={oIdx} className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 font-mono text-[10px] font-semibold">
+                                    ✋ {obj}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </div>
                       );

@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 
 def solve_linear_sum_assignment(cost_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -204,18 +205,15 @@ class SpatialIoUTracker:
         self.max_lost_seconds = max_lost_seconds if max_lost_seconds is not None else getattr(settings, "TRACK_MAX_LOST_SECONDS", 3.5)
         self.iou_threshold = iou_threshold
 
-    def predict_track_bbox(self, track: TrackedObject, target_timestamp: float) -> List[float]:
-        """Predict expected bounding box location using constant velocity model."""
+    def predict_track_bbox(self, track: TrackedObject, target_timestamp: float, camera_shift: Tuple[float, float] = (0.0, 0.0)) -> List[float]:
+        """Predict expected bounding box location using constant velocity model & global camera shift compensation."""
         if not track.positions:
             return [0.0, 0.0, 0.0, 0.0]
 
         last_pos = track.positions[-1]["bbox"]
-        if len(track.positions) < 2 or (track.velocity_x == 0.0 and track.velocity_y == 0.0):
-            return list(last_pos)
-
         dt = max(0.0, target_timestamp - track.last_seen)
-        dx = track.velocity_x * dt
-        dy = track.velocity_y * dt
+        dx = (track.velocity_x * dt) - camera_shift[0]
+        dy = (track.velocity_y * dt) - camera_shift[1]
 
         return [
             round(last_pos[0] + dx, 1),
@@ -248,7 +246,8 @@ class SpatialIoUTracker:
         self,
         track: TrackedObject,
         det: YOLODetection,
-        frame_timestamp: float
+        frame_timestamp: float,
+        camera_shift: Tuple[float, float] = (0.0, 0.0)
     ) -> float:
         """
         Calculate multi-signal assignment cost between track and detection.
@@ -267,8 +266,8 @@ class SpatialIoUTracker:
         if gap_sec <= 0.01 or gap_sec > self.max_lost_seconds:
             return 1000.0
 
-        # Predict expected position using motion model
-        pred_bbox = self.predict_track_bbox(track, frame_timestamp)
+        # Predict expected position using motion model with camera shift compensation
+        pred_bbox = self.predict_track_bbox(track, frame_timestamp, camera_shift=camera_shift)
         iou = calculate_bbox_iou(det.bbox, pred_bbox)
         raw_iou = calculate_bbox_iou(det.bbox, track.positions[-1]["bbox"]) if track.positions else iou
 
@@ -307,8 +306,8 @@ class SpatialIoUTracker:
 
         if effective_iou >= 0.05:
             cost = w_iou * iou_cost + w_dist * dist_cost + w_scale * scale_cost + w_gap * gap_cost
-        elif effective_dist <= box_scale * 3.0 or effective_dist <= getattr(settings, "TRACK_MERGE_MAX_DISTANCE_PX", 180.0):
-            # Lower overlap due to rapid movement -> rely on center distance & size consistency
+        elif norm_dist <= 2.5:
+            # Lower overlap due to rapid movement -> rely on normalized center distance & size consistency
             cost = 0.35 + 0.40 * dist_cost + 0.15 * scale_cost + 0.10 * gap_cost
         else:
             cost = 1000.0
@@ -330,8 +329,28 @@ class SpatialIoUTracker:
 
         sorted_frames = sorted(sampled_frames, key=lambda f: f.timestamp)
 
+        prev_blur = None
+
         for frame in sorted_frames:
             raw_detections = frame_detections.get(frame.frame_id, [])
+
+            # Compute optical flow camera motion shift between consecutive sampled frames
+            camera_shift = (0.0, 0.0)
+            if getattr(settings, "USE_OPTICAL_FLOW", True) and frame.path and Path(frame.path).exists():
+                try:
+                    import cv2
+                    from video.movement_detector import movement_detector
+                    curr_img = cv2.imread(str(frame.path))
+                    if curr_img is not None and curr_img.size > 0:
+                        curr_gray = cv2.cvtColor(curr_img, cv2.COLOR_BGR2GRAY)
+                        curr_blur = cv2.GaussianBlur(curr_gray, (5, 5), 0)
+                        if prev_blur is not None and prev_blur.shape == curr_blur.shape:
+                            is_cam, _, shift_x, shift_y = movement_detector.detect_global_camera_motion(prev_blur, curr_blur)
+                            if is_cam:
+                                camera_shift = (shift_x, shift_y)
+                        prev_blur = curr_blur
+                except Exception:
+                    pass
 
             # Intra-frame NMS deduplication for person detections
             person_dets = [d for d in raw_detections if normalize_class_name(d.class_name) == "person"]
@@ -343,7 +362,9 @@ class SpatialIoUTracker:
                 for kept in deduped_person_dets:
                     iou = calculate_bbox_iou(p_det.bbox, kept.bbox)
                     dist = calculate_center_distance(p_det.bbox, kept.bbox)
-                    if iou >= getattr(settings, "PERSON_NMS_IOU", 0.40) or (dist < 20.0 and iou > 0.25):
+                    box_scale = max(kept.width, kept.height, p_det.width, p_det.height, 30.0)
+                    norm_dist = dist / box_scale
+                    if iou >= getattr(settings, "PERSON_NMS_IOU", 0.40) or (norm_dist < 0.20 and iou > 0.15):
                         is_dup = True
                         break
                 if not is_dup:
@@ -367,7 +388,9 @@ class SpatialIoUTracker:
 
                 for t_idx, trk in enumerate(tracks_list):
                     for d_idx, det in enumerate(detections):
-                        cost_matrix[t_idx, d_idx] = self.calculate_association_cost(trk, det, frame.timestamp)
+                        cost_matrix[t_idx, d_idx] = self.calculate_association_cost(
+                            trk, det, frame.timestamp, camera_shift=camera_shift
+                        )
 
                 row_ind, col_ind = solve_linear_sum_assignment(cost_matrix)
 
@@ -425,7 +448,6 @@ class SpatialIoUTracker:
                     # Check trajectory reassociation with existing recent tracks of same class
                     # CRITICAL FIX: gap_sec must be > 0.05 to prevent merging distinct entities co-existing in the SAME frame!
                     reassociated_track = None
-                    max_merge_dist = getattr(settings, "TRACK_MERGE_MAX_DISTANCE_PX", 180.0) if norm_cls == "person" else 220.0
                     max_merge_gap = getattr(settings, "TRACK_MERGE_MAX_GAP_SEC", 5.0)
 
                     for existing_trk in active_tracks.values():
@@ -437,7 +459,17 @@ class SpatialIoUTracker:
                                 pred_bbox = self.predict_track_bbox(existing_trk, frame.timestamp)
                                 pred_dist = calculate_center_distance(det.bbox, pred_bbox)
 
-                                if min(dist, pred_dist) <= max_merge_dist:
+                                last_w = max(1.0, last_bbox[2] - last_bbox[0])
+                                last_h = max(1.0, last_bbox[3] - last_bbox[1])
+                                det_w = max(1.0, det.bbox[2] - det.bbox[0])
+                                det_h = max(1.0, det.bbox[3] - det.bbox[1])
+                                box_scale = max(last_w, last_h, det_w, det_h, 30.0)
+                                scale_ratio = max(det_w / last_w, last_w / det_w, det_h / last_h, last_h / det_h)
+
+                                norm_dist = min(dist, pred_dist) / box_scale
+                                max_norm_dist = 2.2 if norm_cls == "person" else 3.5
+
+                                if scale_ratio <= 3.0 and (norm_dist <= max_norm_dist or min(dist, pred_dist) <= 220.0):
                                     reassociated_track = existing_trk
                                     break
 
@@ -484,17 +516,6 @@ class SpatialIoUTracker:
                             is_unique_object=(norm_cls != "person"),
                         )
 
-            # Attach VLM activities & interactions
-            if vlm_obs:
-                for det in detections:
-                    if det.track_id and det.track_id in active_tracks:
-                        trk = active_tracks[det.track_id]
-                        for act in vlm_obs.activities:
-                            if act not in trk.activities:
-                                trk.activities.append(act)
-                        for inter in vlm_obs.interactions:
-                            if inter not in trk.interactions:
-                                trk.interactions.append(inter)
 
         # Filter confirmed/valid tracks for output
         output_tracks: List[TrackedObject] = []
@@ -517,7 +538,7 @@ class SpatialIoUTracker:
                 trk.is_unique_object = not is_person
                 output_tracks.append(trk)
 
-        # Calculate movement vector & lifecycle events
+        # Calculate movement vector & lifecycle events using scale-normalized displacement
         for trk in output_tracks:
             if len(trk.positions) > 1:
                 p_first = trk.positions[0]["bbox"]
@@ -526,10 +547,16 @@ class SpatialIoUTracker:
                 cx2, cy2 = (p_last[0] + p_last[2]) / 2.0, (p_last[1] + p_last[3]) / 2.0
 
                 dist = float(np.hypot(cx2 - cx1, cy2 - cy1))
+                w = max(1.0, p_first[2] - p_first[0])
+                h = max(1.0, p_first[3] - p_first[1])
+                box_scale = max(w, h, 30.0)
+                norm_disp = dist / box_scale
+
                 trk.movement_distance = round(dist, 1)
 
-                if dist > 40.0:
-                    trk.movement_confidence = min(0.98, round(0.50 + dist / 300.0, 2))
+                # Normalized displacement threshold: >= 0.35 of box size and >= 25px minimum absolute shift
+                if norm_disp >= 0.35 and dist >= 25.0:
+                    trk.movement_confidence = min(0.98, round(0.50 + norm_disp / 2.0, 2))
                     if "moved" not in trk.lifecycle_events:
                         trk.lifecycle_events.append("moved")
                         trk.state_history.append({"timestamp": trk.last_seen, "state": "moved"})

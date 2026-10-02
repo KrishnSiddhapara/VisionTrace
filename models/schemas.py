@@ -195,6 +195,29 @@ class DeveloperMetrics(BaseModel):
     camera_motion_detected: bool = False
 
 
+class PersonActionRecord(BaseModel):
+    action: str  # e.g. "holding", "walking", "standing"
+    object_name: Optional[str] = None  # e.g. "manjha", "cell phone"
+    confidence: float = 0.90
+    evidence: str = ""  # e.g. "target person's hand visibly contacts the manjha"
+    timestamp: float = 0.0
+
+
+class PersonSpecificObservation(BaseModel):
+    canonical_person_id: str  # e.g. "Person #1"
+    track_id: Optional[str] = None
+    frame_id: str = ""
+    timestamp: float = 0.0
+    bbox: List[float] = Field(default_factory=list)
+    clothing: Optional[str] = None
+    actions: List[PersonActionRecord] = Field(default_factory=list)
+    objects_held: List[Dict[str, Any]] = Field(default_factory=list)  # [{'object': 'manjha', 'confidence': 0.91}]
+    interactions: List[str] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+    confidence: float = 0.90
+    evidence_source: str = "PERSON_VLM_GROUNDED"
+
+
 class FinalObjectRecord(BaseModel):
     name: str
     description: str
@@ -214,7 +237,9 @@ class FinalPersonRecord(BaseModel):
     activities: List[str] = Field(default_factory=list)
     movements: List[str] = Field(default_factory=list)
     interactions: List[str] = Field(default_factory=list)
+    objects_held: List[str] = Field(default_factory=list)
     confidence: float = 0.89
+    evidence_frames: List[float] = Field(default_factory=list)
 
 
 class FinalSummary(BaseModel):

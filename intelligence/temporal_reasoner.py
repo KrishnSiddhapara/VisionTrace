@@ -159,30 +159,7 @@ class TemporalReasoner:
                 )
             )
 
-        # Also pull objects from VLM frame observations ONLY if category not covered by tracks & is a main object
-        from vision.tracker import is_main_object
-        vlm_added_cats = set()
-        for obs in frame_observations:
-            for o in obs.objects:
-                norm_cat = normalize_class_name(o.name)
-                has_change = any(o.name.lower() in item.lower() for item in obs.confirmed_changes + obs.interactions)
-                if norm_cat != "person" and norm_cat not in covered_categories and norm_cat not in vlm_added_cats:
-                    if is_main_object(o.name, has_movement_or_interaction=has_change):
-                        m_s, s_s = divmod(obs.timestamp, 60)
-                        display_name = o.name.capitalize()
-                        vlm_added_cats.add(norm_cat)
-                        final_objects.append(
-                            FinalObjectRecord(
-                                name=display_name,
-                                description=o.description or f"{display_name} visible in frame keyframes",
-                                first_seen=f"{int(m_s):02d}:{s_s:04.1f}",
-                                last_seen=f"{int(m_s):02d}:{s_s:04.1f}",
-                                movement="Observed in frame keyframes",
-                                state_changes=obs.confirmed_changes,
-                                interactions=obs.interactions,
-                                confidence=round(float(o.confidence or 0.88), 2),
-                            )
-                        )
+
 
         # 2. Aggregate People Entities using CanonicalPersonRegistry (Single Source of Truth)
         from vision.person_registry import canonical_person_registry
@@ -204,6 +181,7 @@ class TemporalReasoner:
                     activities=pe.activities,
                     movements=pe.lifecycle_events or [f"{pe.motion_state.capitalize()} stance"],
                     interactions=pe.interactions,
+                    objects_held=pe.objects_held,
                     confidence=round(pe.avg_confidence, 2),
                 )
             )
@@ -228,12 +206,26 @@ class TemporalReasoner:
         if prompt_file.exists() and sampled_frames and not settings.VLM_MOCK_MODE and vlm_provider.client:
             try:
                 prompt_template = prompt_file.read_text(encoding="utf-8")
-                evidence_text = f"TIMELINE EVENTS:\n" + "\n".join([f"[{t.get('formatted_time')}] {t.get('description')}" for t in timeline[:8]])
+                evidence_text = f"TIMELINE EVENTS:\n" + "\n".join([f"[{t.get('formatted_time')}] {t.get('description')}" for t in timeline[:12]])
                 prompt = prompt_template + f"\n\nVIDEO METADATA:\nFilename: {metadata.filename}\nDuration: {metadata.duration_sec}s\n\n{evidence_text}"
 
-                top_paths = [sf.path for sf in sampled_frames[:3] if Path(sf.path).exists()]
-                if top_paths:
-                    vlm_res = vlm_provider.analyze_images(top_paths, prompt)
+                # Representative frame selection across ENTIRE video (Beginning, Middle, End, Key Events)
+                rep_indices = set()
+                n_frames = len(sampled_frames)
+                if n_frames > 0:
+                    rep_indices.add(0)  # Beginning
+                    rep_indices.add(n_frames // 2)  # Middle
+                    rep_indices.add(n_frames - 1)  # End
+                    if n_frames >= 4:
+                        rep_indices.add(n_frames // 4)
+                        rep_indices.add((3 * n_frames) // 4)
+
+                selected_frames = [sampled_frames[i] for i in sorted(rep_indices) if Path(sampled_frames[i].path).exists()]
+                representative_paths = [sf.path for sf in selected_frames[:5]]
+
+                if representative_paths:
+                    logger.info(f"[TEMPORAL REASONER] Selected {len(representative_paths)} representative keyframes across full video duration for final VLM summary.")
+                    vlm_res = vlm_provider.analyze_images(representative_paths, prompt)
                     if vlm_res and isinstance(vlm_res, dict):
                         if "final_description" in vlm_res and vlm_res["final_description"]:
                             final_desc = vlm_res["final_description"]

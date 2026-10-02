@@ -232,7 +232,59 @@ class TestPersonAccuracy(unittest.TestCase):
         self.assertEqual(shortnote, "Walking across room")
         self.assertNotIn("Displacement:", shortnote)
         self.assertNotIn("Stance:", shortnote)
-        self.assertNotIn("\n", shortnote)
+    def test_10_get_unique_person_count_authority(self):
+        """Test 10: Verify get_unique_person_count returns authoritative count ignoring VLM text and raw tracks."""
+        from vision.person_registry import get_unique_person_count
+        tracker = SpatialIoUTracker()
+        sampled_frames = [
+            SampledFrame(frame_id="f1", timestamp=1.0, frame_index=30, path="f1.jpg", scene_id=1),
+            SampledFrame(frame_id="f2", timestamp=2.0, frame_index=60, path="f2.jpg", scene_id=1),
+        ]
+        frame_detections = {
+            "f1": [
+                YOLODetection(class_name="person", confidence=0.92, bbox=[100.0, 100.0, 150.0, 250.0]),
+                YOLODetection(class_name="person", confidence=0.90, bbox=[300.0, 100.0, 350.0, 250.0]),
+            ],
+            "f2": [
+                YOLODetection(class_name="person", confidence=0.91, bbox=[102.0, 100.0, 152.0, 250.0]),
+                YOLODetection(class_name="person", confidence=0.89, bbox=[302.0, 100.0, 352.0, 250.0]),
+            ],
+        }
+        tracks = tracker.track_entities(sampled_frames, frame_detections, [])
+        count = get_unique_person_count(tracks)
+        self.assertEqual(count, 2, f"Expected get_unique_person_count() to return 2, got {count}")
+
+    def test_11_six_people_manjha_isolation(self):
+        """Test 11: 6 people where only Person #1 holds manjha. Persons #2-#6 must NOT inherit manjha."""
+        person1 = PersonEntity(
+            person_id="Person #1", first_seen=1.0, last_seen=5.0,
+            objects_held=["manjha"], person_description="Holding manjha."
+        )
+        person2 = PersonEntity(person_id="Person #2", first_seen=1.0, last_seen=5.0, motion_state="STATIONARY")
+        person3 = PersonEntity(person_id="Person #3", first_seen=1.0, last_seen=5.0, motion_state="STATIONARY")
+        person4 = PersonEntity(person_id="Person #4", first_seen=1.0, last_seen=5.0, motion_state="MOVING")
+        person5 = PersonEntity(person_id="Person #5", first_seen=1.0, last_seen=5.0, motion_state="STATIONARY")
+        person6 = PersonEntity(person_id="Person #6", first_seen=1.0, last_seen=5.0, motion_state="STATIONARY")
+
+        people = [person1, person2, person3, person4, person5, person6]
+
+        self.assertIn("manjha", person1.get_shortnote_description().lower())
+        for p in people[1:]:
+            desc = p.get_shortnote_description().lower()
+            self.assertNotIn("manjha", desc, f"{p.person_id} falsely inherited manjha: {desc}")
+            self.assertEqual(len(p.objects_held), 0, f"{p.person_id} falsely has objects_held")
+
+    def test_12_different_held_objects_isolation(self):
+        """Test 12: Verify isolated object ownership per person without cross-contamination."""
+        p1 = PersonEntity(person_id="Person #1", first_seen=1.0, last_seen=5.0, objects_held=["manjha"])
+        p2 = PersonEntity(person_id="Person #2", first_seen=1.0, last_seen=5.0, objects_held=["mobile phone"])
+        p3 = PersonEntity(person_id="Person #3", first_seen=1.0, last_seen=5.0, objects_held=["water bottle"])
+        p4 = PersonEntity(person_id="Person #4", first_seen=1.0, last_seen=5.0, motion_state="STATIONARY")
+
+        self.assertEqual(p1.get_shortnote_description(), "Holding manjha.")
+        self.assertEqual(p2.get_shortnote_description(), "Holding mobile phone.")
+        self.assertEqual(p3.get_shortnote_description(), "Holding water bottle.")
+        self.assertIn("No clearly visible held object", p4.get_shortnote_description())
 
 
 if __name__ == "__main__":

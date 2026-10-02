@@ -146,6 +146,37 @@ def run_pipeline_with_progress(
     # Step 8: Temporal Reasoning & Final Summary Generation
     _notify(8, 95, "Temporal Reasoning", "Synthesizing grounded timeline & physical object summary...")
     profiler.start_stage("Temporal Reasoning")
+
+    person_entities = canonical_person_registry.reconcile_person_tracks(tracks, frame_obs_list, metadata)
+    phys_objects = physical_object_registry.reconcile_tracks(tracks, frame_obs_list)
+    non_person_phys = [po for po in phys_objects if po.canonical_name != "person"]
+
+    # Execute Isolated Grounded Person VLM Analysis per canonical person entity
+    if person_entities and not settings.VLM_MOCK_MODE:
+        try:
+            from vision.person_analyzer import person_analyzer
+            def _analyze_pe_worker(pe):
+                obs_list = person_analyzer.analyze_canonical_person(pe, sampled_frames, metadata.video_hash)
+                pe.person_observations = obs_list
+                held = []
+                for obs in obs_list:
+                    for item in obs.objects_held:
+                        o_name = item.get("object")
+                        if o_name and o_name not in held:
+                            held.append(o_name)
+                pe.objects_held = held
+                if obs_list and obs_list[0].actions:
+                    act_item = obs_list[0].actions[0]
+                    if act_item.object_name and act_item.action.lower() in ("holding", "carrying"):
+                        pe.person_description = f"Holding {act_item.object_name}."
+                    elif act_item.action and act_item.action.lower() not in ("observing", "standing", "present"):
+                        pe.person_description = f"{act_item.action.capitalize()} in visible area."
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(settings.VLM_MAX_WORKERS, max(1, len(person_entities)))) as executor:
+                list(executor.map(_analyze_pe_worker, person_entities))
+        except Exception as pe_err:
+            logger.warning(f"Person grounded VLM analysis error: {pe_err}")
+
     timeline = temporal_reasoner.synthesize_timeline(scenes, verified_events, tracks, frame_obs_list)
     summaries = temporal_reasoner.generate_summaries(metadata, scenes, timeline, tracks)
     final_summary = temporal_reasoner.generate_final_summary(metadata, scenes, timeline, tracks, frame_obs_list, sampled_frames)
@@ -153,17 +184,34 @@ def run_pipeline_with_progress(
 
     total_proc_time = profiler.stop_pipeline()
 
-    # Calculate Canonical Counts
-    person_entities = canonical_person_registry.reconcile_person_tracks(tracks, frame_obs_list, metadata)
-    phys_objects = physical_object_registry.reconcile_tracks(tracks, frame_obs_list)
-    non_person_phys = [po for po in phys_objects if po.canonical_name != "person"]
-
     raw_person_dets_cnt = sum(
         len([d for d in det_list if d.class_name.lower() in ("person", "people", "human", "man", "woman", "child", "kid", "player")])
         for det_list in yolo_dets.values()
     )
     confirmed_person_tracks_cnt = len([t for t in tracks if t.canonical_name == "person"])
     canonical_person_cnt = len(person_entities)
+
+    # Detailed Per-Frame Developer & Validation Debug Logs
+    if settings.DEVELOPER_MODE or getattr(settings, "DEBUG_PERSON_TRACKING", False):
+        logger.info("--- PER-FRAME PERCEPTION DEBUG LOG ---")
+        for sf in sampled_frames:
+            f_dets = yolo_dets.get(sf.frame_id, [])
+            raw_p = len([d for d in f_dets if d.class_name.lower() in ("person", "people", "human", "man", "woman", "child", "kid", "player")])
+            raw_o = len([d for d in f_dets if d.class_name.lower() not in ("person", "people", "human", "man", "woman", "child", "kid", "player")])
+            
+            # Active tracks at this frame timestamp
+            active_p_trks = len([t for t in tracks if t.canonical_name == "person" and any(abs(p.get("timestamp", 0) - sf.timestamp) < 0.1 for p in t.positions)])
+            
+            # VLM observation count if present
+            v_obs = frame_obs_map.get(sf.frame_id)
+            vlm_p = len(v_obs.people) if v_obs and v_obs.people else 0
+            
+            logger.info(
+                f"[{sf.frame_id} @ {sf.timestamp:.2f}s] Raw persons: {raw_p} | Active person tracks: {active_p_trks} | "
+                f"Canonical persons: {canonical_person_cnt} | Raw objects: {raw_o} | VLM reported people: {vlm_p} "
+                f"(Authority: Canonical Registry)"
+            )
+        logger.info("--------------------------------------")
 
     logger.info(
         f"[PERSON COUNT CONSISTENCY CHECK] Raw Person Detections: {raw_person_dets_cnt} | "

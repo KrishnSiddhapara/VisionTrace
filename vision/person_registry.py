@@ -3,7 +3,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field
 
-from models.schemas import TrackedObject, FrameObservation, VideoMetadata, PersonObservation
+from models.schemas import TrackedObject, FrameObservation, VideoMetadata, PersonObservation, PersonSpecificObservation
 from vision.tracker import calculate_bbox_iou, calculate_center_distance, normalize_class_name, is_person_class
 from utils.logger import logger
 
@@ -25,10 +25,25 @@ class PersonEntity(BaseModel):
     velocity_px_sec: float = 0.0
     evidence_level: str = "CONFIRMED"  # 'CONFIRMED', 'PROBABLE', 'UNCERTAIN'
     is_active: bool = True
+    objects_held: List[str] = Field(default_factory=list)
+    person_description: Optional[str] = None
+    person_observations: List[PersonSpecificObservation] = Field(default_factory=list)
 
     def get_shortnote_description(self) -> str:
-        """Generates a succinct short note description without technical noise or long detailed breakdowns."""
-        clean_acts = [a for a in self.activities if a.lower() not in ("present in scene", "present in visual scene")]
+        """Generates an isolated, succinct description guaranteed free of cross-person leakage."""
+        if self.person_description:
+            return self.person_description.strip()
+
+        if self.objects_held:
+            clean_objs = [o for o in self.objects_held if o.lower() not in ("none", "null", "nothing")]
+            if clean_objs:
+                obj_str = ", ".join(clean_objs)
+                return f"Holding {obj_str}."
+
+        clean_acts = [
+            a for a in self.activities
+            if a.lower() not in ("present in scene", "present in visual scene", "moving across visible area", "stationary in scene")
+        ]
 
         if clean_acts:
             return clean_acts[0].strip().capitalize()
@@ -37,9 +52,9 @@ class PersonEntity(BaseModel):
             return self.lifecycle_events[0].strip().capitalize()
 
         if self.motion_state == "MOVING":
-            return "Moving in visible area"
+            return "Moving in visible area."
 
-        return "Stationary in scene"
+        return "Stationary in scene. No clearly visible held object."
 
 
 
@@ -185,13 +200,15 @@ class CanonicalPersonRegistry:
                     h1 = max(1.0, entity_last_bbox[3] - entity_last_bbox[1])
                     w2 = max(1.0, trk_first_bbox[2] - trk_first_bbox[0])
                     h2 = max(1.0, trk_first_bbox[3] - trk_first_bbox[1])
+                    box_scale = max(w1, h1, w2, h2, 30.0)
                     scale_diff = max(w1 / w2, w2 / w1, h1 / h2, h2 / h1)
 
                     if scale_diff <= 2.5:
                         effective_gap = max(0.0, time_gap)
-                        max_allowed_dist = max(200.0, 120.0 * effective_gap)
-                        if dist <= max_allowed_dist or iou >= 0.05:
-                            match_score = max(0.1, 1.0 - (dist / max_allowed_dist))
+                        norm_dist = dist / box_scale
+                        max_allowed_norm_dist = max(2.5, 1.2 * effective_gap)
+                        if norm_dist <= max_allowed_norm_dist or iou >= 0.05:
+                            match_score = max(0.1, 1.0 - (norm_dist / max_allowed_norm_dist))
                             if match_score > best_score:
                                 best_score = match_score
                                 best_match = entity
@@ -325,48 +342,7 @@ class CanonicalPersonRegistry:
             if (total_duration - entity.last_seen) > 1.5 and self._is_near_boundary(last_bbox, width, height):
                 entity.lifecycle_events.append("exited visible area")
 
-        # 6. Attach VLM semantic observations to existing PersonEntities (Without creating fake visual entities)
-        if frame_observations:
-            for obs in frame_observations:
-                if not obs.people:
-                    continue
-
-                active_entities = [
-                    e for e in person_entities
-                    if e.first_seen <= (obs.timestamp + 3.0) and e.last_seen >= (obs.timestamp - 3.0)
-                ]
-
-                # Match VLM descriptions to existing physical person entities if present
-                for idx, v_person in enumerate(obs.people):
-                    if idx < len(active_entities):
-                        target_entity = active_entities[idx]
-                        if v_person.activity and v_person.activity not in target_entity.activities:
-                            target_entity.activities.append(v_person.activity)
-
-                # Fallback recovery ONLY if zero visual tracks exist at all
-                if not person_entities and obs.people:
-                    for k, v_person in enumerate(obs.people, start=1):
-                        p_id = f"Person #{k}"
-                        act_list = [v_person.activity] if v_person.activity else ["Present in visual scene"]
-                        person_entities.append(
-                            PersonEntity(
-                                person_id=p_id,
-                                canonical_name="person",
-                                first_seen=obs.timestamp,
-                                last_seen=obs.timestamp,
-                                track_ids=[f"vlm_person_{k}"],
-                                positions=[{"timestamp": obs.timestamp, "bbox": [100.0, 100.0, 200.0, 300.0]}],
-                                activities=act_list,
-                                interactions=[],
-                                lifecycle_events=[],
-                                avg_confidence=v_person.confidence or 0.88,
-                                hits_count=1,
-                                evidence_level="CONFIRMED",
-                                is_active=True,
-                            )
-                        )
-
-        # 7. Final clean renumbering of Person IDs: Person #1, Person #2, Person #3...
+        # 6. Final clean renumbering of Person IDs: Person #1, Person #2, Person #3...
         for idx, pe in enumerate(person_entities, start=1):
             pe.person_id = f"Person #{idx}"
 
@@ -378,3 +354,16 @@ class CanonicalPersonRegistry:
 
 
 canonical_person_registry = CanonicalPersonRegistry()
+
+
+def get_unique_person_count(
+    tracks: List[TrackedObject],
+    frame_observations: List[FrameObservation] = None,
+    metadata: Optional[VideoMetadata] = None
+) -> int:
+    """
+    Authoritative function returning the exact count of canonical confirmed physical persons.
+    Does NOT count raw detections, frame observations, temporary tracks, VLM text, or events.
+    """
+    entities = canonical_person_registry.reconcile_person_tracks(tracks, frame_observations, metadata)
+    return len(entities)

@@ -57,19 +57,35 @@ class YOLOObjectDetector:
     def suppress_duplicate_person_detections(self, detections: List[YOLODetection]) -> List[YOLODetection]:
         """
         Apply person-specific intra-frame NMS and duplicate suppression.
-        If multiple boxes represent the same physical person in a single frame, suppress lower-confidence box.
+        - Bbox quality filtering: Reject implausible aspect ratios or tiny noise boxes.
+        - Scale-normalized center distance: Scale threshold dynamically based on bounding box dimensions.
         """
         person_dets = [d for d in detections if d.class_name.lower() in ("person", "people", "human", "man", "woman", "child", "kid", "player")]
         other_dets = [d for d in detections if d not in person_dets]
 
-        if len(person_dets) <= 1:
-            return detections
+        # Bbox quality filtering for persons
+        valid_person_dets: List[YOLODetection] = []
+        for d in person_dets:
+            w = max(1.0, d.width)
+            h = max(1.0, d.height)
+            aspect_ratio = w / h
+            # Filter out tiny artifacts or extreme aspect ratio noise
+            if w < 12.0 or h < 20.0:
+                continue
+            if aspect_ratio > 3.5 or aspect_ratio < 0.12:
+                continue
+            valid_person_dets.append(d)
+
+        if len(valid_person_dets) <= 1:
+            return valid_person_dets + other_dets
 
         # Sort person detections by confidence descending
-        sorted_persons = sorted(person_dets, key=lambda d: d.confidence, reverse=True)
+        sorted_persons = sorted(valid_person_dets, key=lambda d: d.confidence, reverse=True)
         kept_persons: List[YOLODetection] = []
 
         from vision.tracker import calculate_bbox_iou, calculate_center_distance
+
+        nms_iou_thresh = getattr(settings, "PERSON_NMS_IOU", 0.40)
 
         for p_det in sorted_persons:
             is_duplicate = False
@@ -81,11 +97,15 @@ class YOLOObjectDetector:
                 h_kept = max(1.0, kept.height)
                 w_p = max(1.0, p_det.width)
                 h_p = max(1.0, p_det.height)
-                area_ratio = max(w_p * h_p / (w_kept * h_kept), (w_kept * h_kept) / (w_p * h_p))
 
-                # If high overlap (IoU >= NMS threshold) OR very close center distance with similar size -> duplicate
-                nms_iou_thresh = getattr(settings, "PERSON_NMS_IOU", 0.40)
-                if iou >= nms_iou_thresh or (dist < 25.0 and area_ratio < 2.0):
+                # Scale-normalized distance relative to target bounding box size
+                box_scale = max(w_kept, h_kept, w_p, h_p, 30.0)
+                norm_dist = dist / box_scale
+
+                area_ratio = max((w_p * h_p) / (w_kept * h_kept), (w_kept * h_kept) / (w_p * h_p))
+
+                # Duplicate if IoU >= threshold OR (normalized center dist < 0.22 and box scale ratio < 1.8)
+                if iou >= nms_iou_thresh or (norm_dist < 0.22 and area_ratio < 1.8):
                     is_duplicate = True
                     break
 
